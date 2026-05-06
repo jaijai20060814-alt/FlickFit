@@ -1,0 +1,9 @@
+{
+  "_doc": "個人環境でファイル名・フォルダ名の追加ルールが必要な場合は、このファイルを VolumePatternOverrides.json としてコピーして編集してください。配布・公開用の空テンプレです。従来どおりの具体例は VolumePatternOverrides.legacy-example.json を参照。",
+  "source_prefixes": {
+    "chapter": [],
+    "volume": []
+  },
+  "sanitize_source_noise_patterns": [],
+  "cover_folder_name_tokens_extra": []
+}
