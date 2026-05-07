@@ -1877,6 +1877,14 @@ function Test-HashtableKeyPresent {
     return $false
 }
 
+# ノドGUI戻り: DeleteImage または DeleteRequested（セッション内に削除があって OK で閉じた場合）
+function Test-FlickFitGutterGuiDeleteRequested {
+    param($Tbl)
+    if ($null -eq $Tbl -or $Tbl -isnot [System.Collections.IDictionary]) { return $false }
+    if (Test-GuiMarginFlagTrue -Tbl $Tbl -Key 'DeleteImage') { return $true }
+    if (Test-GuiMarginFlagTrue -Tbl $Tbl -Key 'DeleteRequested') { return $true }
+    return $false
+}
 # ノドGUI戻り: キーが存在し、値が厳密に $true のときだけ真（未設定・$false・$null・1 文字列等は偽）。PhotosEdit / DeleteImage 用
 function Test-GuiMarginFlagTrue {
     param($Tbl, [string]$Key)
@@ -2232,7 +2240,7 @@ function Normalize-GutterGuiResult {
             }
         }
     }
-    foreach ($boolKey in @('DeleteImage', 'PhotosEdit', 'ApplyOnlyThisSpread')) {
+    foreach ($boolKey in @('DeleteImage', 'DeleteRequested', 'PhotosEdit', 'ApplyOnlyThisSpread')) {
         if (Test-HashtableKeyPresent -Tbl $GuiResult -Key $boolKey) {
             $out[$boolKey] = (Test-GuiMarginFlagTrue -Tbl $GuiResult -Key $boolKey)
         }
@@ -2733,11 +2741,13 @@ function Show-GutterMarginSetGui {
         }
         if ($gmlPath -and (Test-Path -LiteralPath $gmlPath)) { try { . $gmlPath } catch { } }
     }
-    $dims = Get-ImageDimensions -Path $ImagePath
+    $imgPathResolvedForGui = try { (Resolve-Path -LiteralPath $ImagePath -ErrorAction Stop).Path } catch { $ImagePath }
+    $script:guiMarginSessionImagePath = $imgPathResolvedForGui
+    $dims = Get-ImageDimensions -Path $imgPathResolvedForGui
     $imgW = $dims.Width
     $imgH = $dims.Height
     if ($imgW -le 0 -or $imgH -le 0) { return $null }
-    $baseImagePath = $ImagePath
+    $baseImagePath = $imgPathResolvedForGui
     $baseImgW = $imgW
     $baseImgH = $imgH
     $navList = [System.Collections.Generic.List[string]]::new()
@@ -2748,9 +2758,21 @@ function Show-GutterMarginSetGui {
             $rp = (Resolve-Path -LiteralPath $ap -ErrorAction SilentlyContinue).Path
             if ($rp) { [void]$navList.Add($rp) }
         }
-        $imgPathNorm = (Resolve-Path -LiteralPath $ImagePath -ErrorAction SilentlyContinue).Path
+        $anchorFoundInNav = $false
         for ($i = 0; $i -lt $navList.Count; $i++) {
-            if ($imgPathNorm -and [string]::Equals($navList[$i], $imgPathNorm, [StringComparison]::OrdinalIgnoreCase)) { $baseIdx = $i; break }
+            if ($imgPathResolvedForGui -and [string]::Equals($navList[$i], $imgPathResolvedForGui, [StringComparison]::OrdinalIgnoreCase)) {
+                $baseIdx = $i
+                $anchorFoundInNav = $true
+                break
+            }
+        }
+        # 親側の一覧が古い（例: GUI 内で削除済み）と ImagePath だけ復元されたリトライで nav に無い → CurrentIdx=0 のまま別ファイルを消す事故が起きる
+        if (-not $anchorFoundInNav -and $imgPathResolvedForGui -and (Test-Path -LiteralPath $imgPathResolvedForGui)) {
+            [void]$navList.Add($imgPathResolvedForGui)
+            $baseIdx = $navList.Count - 1
+            if ($true -eq $script:FlickFitDebugStep5Entry) {
+                Write-FlickFitHost "[GuiMarginNav] ImagePath が AllImagePaths に含まれないため nav 末尾に追加しました: $(Split-Path $imgPathResolvedForGui -Leaf)" -ForegroundColor DarkYellow
+            }
         }
     }
     $deletedInSession = [System.Collections.Generic.List[string]]::new()
@@ -2817,9 +2839,10 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
     $script:guiMarginZoom = 1.0
     $imgMs = $null
     try {
-        $imgMs = New-Object System.IO.MemoryStream(,([System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $ImagePath).Path)))
+        $imgMs = New-Object System.IO.MemoryStream(,([System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $imgPathResolvedForGui).Path)))
         $img = [System.Drawing.Image]::FromStream($imgMs)
         $pb.Image = $img
+        $script:guiMarginLoadedPath = $imgPathResolvedForGui
         try {
             $bf = [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Instance
             $setStyleMethod = [System.Windows.Forms.Control].GetMethod("SetStyle", $bf, $null, [type[]]@([System.Windows.Forms.ControlStyles], [bool]), $null)
@@ -2930,6 +2953,8 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
     $script:gmUiSpecifyGutter = $true
     $reviewTopPad = 0
     if (-not [string]::IsNullOrWhiteSpace($ValidationSummaryText) -and -not $CoverConfirmMode) { $reviewTopPad = 90 }
+    # 表紙確認: 手動90°/180°回転ボタン行のため下段を下げる
+    $coverQuickRotPad = if ($CoverConfirmMode) { 32 } else { 0 }
     $yRS = $reviewTopPad
     # 下パネル内の縦位置（サイズ3行・チェック2行・ヒント折り返し・余白・ノド1行・表紙用2段ボタンが重ならないよう間隔を確保。横幅はフォーム幅内で折り返し）
     $gmPadL = 20
@@ -2938,11 +2963,12 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
     $gmYSize = 6 + $yRS
     $gmYChk = 58 + $yRS
     $gmYHint = 106 + $yRS
-    $gmYRow1 = 174 + $yRS
+    $gmYRow1 = 174 + $yRS + $coverQuickRotPad
     # 余白4項目＋回転モード＋注記は同一行のため、旧2段目を廃止してボタン行を詰める
-    $gmYBtn = 204 + $yRS
+    $gmYBtn = 204 + $yRS + $coverQuickRotPad
     # 表紙2段目ボタン: 主行ボタン列の直下
-    $gmYCov2 = 240 + $yRS
+    $gmYCov2 = 240 + $yRS + $coverQuickRotPad
+    $gmYCovQuickRot = 174 + $yRS
     $lblSizeInfo = New-Object System.Windows.Forms.Label
     $lblSizeInfo.AutoSize = $true
     $lblSizeInfo.MaximumSize = New-Object System.Drawing.Size($gmLblMaxW, 0)
@@ -3785,7 +3811,7 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
     $pnl = New-Object System.Windows.Forms.Panel
     $pnl.Dock = "Bottom"
     $pnl.BackColor = [System.Drawing.SystemColors]::Window
-    $pnlBaseH = if ($CoverConfirmMode) { 316 } else { 292 }
+    $pnlBaseH = if ($CoverConfirmMode) { 348 } else { 292 }
     $pnl.Height = $pnlBaseH + $reviewTopPad
     $pnl.Padding = New-Object System.Windows.Forms.Padding(6, 2, 6, 6)
     $pnl.AutoScroll = $true
@@ -4195,6 +4221,7 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
                 $txtGutter.Text = [Math]::Round(100.0 * $script:gutterImgX / $script:guiMarginImgW, 1).ToString([System.Globalization.CultureInfo]::InvariantCulture)
             }
             $outResolved = try { (Resolve-Path -LiteralPath $outAd -ErrorAction Stop).Path } catch { $outAd }
+            $script:guiMarginLoadedPath = $outResolved
             if ($navList.Count -gt 0) { $navList[$script:guiMarginCurrentIdx] = $outResolved }
             try { $baseImagePath = $outResolved } catch { }
             if ($CoverConfirmMode -and $script:guiViewingOriginal) {
@@ -4269,6 +4296,7 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
             $imgMs = New-Object System.IO.MemoryStream(,([System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $newPath).Path)))
             $img = [System.Drawing.Image]::FromStream($imgMs)
             $pb.Image = $img
+            $script:guiMarginLoadedPath = try { (Resolve-Path -LiteralPath $newPath -ErrorAction Stop).Path } catch { $newPath }
             if ($keepMargin -and $script:guiMarginImgW -gt 0) {
                 # ノド位置を旧画像の%比率で新画像幅にスケール
                 $gutterPct = $script:gutterImgX / $script:guiMarginImgW
@@ -4304,6 +4332,103 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
             $pb.Image = $null
             Write-FlickFitHost "         [警告] 画像読み込み失敗（破損・非対応形式の可能性）: $(Split-Path $newPath -Leaf)" -ForegroundColor Yellow
             return $false
+        }
+    }
+    # 表紙確認: 90°/180° の手動回転（クォーターターン）。微回転の「回転モード」とは別。自動回転しない。
+    $applyCoverQuick90Rotate = {
+        param(
+            [ValidateSet(-90, 90, 180)]
+            [int]$AngleDeg,
+            [string]$UiLabel = "表紙の回転"
+        )
+        if (-not $CoverConfirmMode) { return }
+        if (-not (Get-Command Invoke-FlickFitImageRotateToFile -ErrorAction SilentlyContinue)) {
+            [void][System.Windows.Forms.MessageBox]::Show(
+                "回転の保存モジュールが読み込まれていません（FlickFitImageRotate を確認してください）。",
+                $UiLabel,
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning)
+            return
+        }
+        try { . $clearRotPreview } catch {}
+        $ow0 = [int]$script:guiMarginImgW
+        $oh0 = [int]$script:guiMarginImgH
+        $apQ = if ($CoverConfirmMode -and $script:guiViewingOriginal -and -not [string]::IsNullOrWhiteSpace($guiOriginalPath) -and (Test-Path -LiteralPath $guiOriginalPath)) {
+            try { (Resolve-Path -LiteralPath $guiOriginalPath -ErrorAction Stop).Path } catch { $guiOriginalPath }
+        } elseif ($navList.Count -gt 0) {
+            $pNavQ = $navList[$script:guiMarginCurrentIdx]
+            try { (Resolve-Path -LiteralPath $pNavQ -ErrorAction Stop).Path } catch { $pNavQ }
+        } elseif ($OkAppliesToCurrentView) {
+            try { (Resolve-Path -LiteralPath $ImagePath -ErrorAction Stop).Path } catch { $ImagePath }
+        } else {
+            try { (Resolve-Path -LiteralPath $baseImagePath -ErrorAction Stop).Path } catch { $baseImagePath }
+        }
+        if (-not $apQ -or -not (Test-Path -LiteralPath $apQ)) {
+            [void][System.Windows.Forms.MessageBox]::Show("回転元の画像パスが無効です。", $UiLabel, [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            return
+        }
+        try {
+            $parQ = [System.IO.Path]::GetDirectoryName($apQ)
+            $stemQ = [System.IO.Path]::GetFileNameWithoutExtension($apQ)
+            $extQ = [System.IO.Path]::GetExtension($apQ)
+            if ([string]::IsNullOrWhiteSpace($extQ)) { $extQ = '.jpg' }
+            $outQ = Join-Path $parQ ("cvr_rot_" + $stemQ + $extQ)
+            [void](Invoke-FlickFitImageRotateToFile -SourcePath $apQ -OutputPath $outQ -AngleDegrees $AngleDeg -FillColor White -ErrorAction Stop)
+            $ndQ = Get-ImageDimensions -Path $outQ
+            if ($ndQ.Width -le 0 -or $ndQ.Height -le 0) { throw "回転後の画像サイズが取得できませんでした" }
+            $sx = $ndQ.Width / [double][Math]::Max(1, $ow0)
+            $sy = $ndQ.Height / [double][Math]::Max(1, $oh0)
+            $script:guiMarginImgW = [int]$ndQ.Width
+            $script:guiMarginImgH = [int]$ndQ.Height
+            $script:gutterImgX = [Math]::Max(1, [Math]::Min($script:guiMarginImgW - 1, [int][Math]::Round($script:gutterImgX * $sx)))
+            $script:leftTrimPx = [Math]::Max(0, [int][Math]::Round($script:leftTrimPx * $sx))
+            $script:rightTrimPx = [Math]::Max(0, [int][Math]::Round($script:rightTrimPx * $sx))
+            $script:topTrimPx = [Math]::Max(0, [int][Math]::Round($script:topTrimPx * $sy))
+            $script:bottomTrimPx = [Math]::Max(0, [int][Math]::Round($script:bottomTrimPx * $sy))
+            $vertQ = Repair-GutterVerticalMargins -ImgH $script:guiMarginImgH -TopTrim $script:topTrimPx -BottomTrim $script:bottomTrimPx
+            $script:topTrimPx = $vertQ.TopTrimPx
+            $script:bottomTrimPx = $vertQ.BottomTrimPx
+            if ($null -ne $rotPrev.Bmp) { try { $rotPrev.Bmp.Dispose() } catch {}; $rotPrev.Bmp = $null }
+            $rotPrev.Snap0 = $null
+            $rotPrev.Active = $false
+            $pb.Image = $null
+            if ($null -ne $img -and $img -is [System.IDisposable]) { try { $img.Dispose() } catch {}; $img = $null }
+            if ($null -ne $imgMs) { try { $imgMs.Dispose() } catch {}; $imgMs = $null }
+            $imgMs = New-Object System.IO.MemoryStream(, ([System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $outQ).Path)))
+            $img = [System.Drawing.Image]::FromStream($imgMs)
+            $pb.Image = $img
+            if ($null -ne $txtLeft) { $txtLeft.Text = [string]$script:leftTrimPx }
+            if ($null -ne $txtRight) { $txtRight.Text = [string]$script:rightTrimPx }
+            if ($null -ne $txtTop) { $txtTop.Text = [string]$script:topTrimPx }
+            if ($null -ne $txtBottom) { $txtBottom.Text = [string]$script:bottomTrimPx }
+            if ($null -ne $txtGutter -and $script:guiMarginImgW -gt 0) {
+                $txtGutter.Text = [Math]::Round(100.0 * $script:gutterImgX / $script:guiMarginImgW, 1).ToString([System.Globalization.CultureInfo]::InvariantCulture)
+            }
+            $outResolved = try { (Resolve-Path -LiteralPath $outQ -ErrorAction Stop).Path } catch { $outQ }
+            $script:guiMarginLoadedPath = $outResolved
+            if ($navList.Count -gt 0) { $navList[$script:guiMarginCurrentIdx] = $outResolved }
+            try { $baseImagePath = $outResolved } catch { }
+            if ($CoverConfirmMode -and $script:guiViewingOriginal) {
+                $script:guiViewingOriginal = $false
+                if ($null -ne $btnViewOrig) { $btnViewOrig.Text = "トリミング前を表示" }
+                $ncTi = $navList.Count
+                $form.Text = if ($ncTi -gt 1) { "$Title  (表示: $($script:guiMarginCurrentIdx + 1)/$ncTi)" } else { $Title }
+            }
+            try { $nudRot.Value = 0 } catch { }
+            $script:guiMarginRotDeg = 0.0
+            if ($null -ne $btnRotPreview) { $btnRotPreview.Text = "回転プレビュー" }
+            Write-FlickFitHost "         [$UiLabel] ${AngleDeg}° → $outResolved（作業画像を更新・微回転の角度は0にリセット）" -ForegroundColor DarkCyan
+            try { & $applyGmMarginBarsVisibility } catch { }
+            try { & $applyGmZoomLayout -PreserveScroll } catch { try { & $applyGmZoomLayout } catch { } }
+            try { & $updateBarPosWrapper } catch { }
+            try { & $updateGmRotChrome } catch { }
+            try { & $updateSizeInfo } catch { }
+        } catch {
+            [void][System.Windows.Forms.MessageBox]::Show(
+                "回転の保存に失敗しました: $($_.Exception.Message)",
+                $UiLabel,
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning)
         }
     }
     $switchImage = {
@@ -4478,6 +4603,9 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
                 if ($script:guiViewingOriginal) {
                     if ($null -ne $guiOriginalImg) {
                         $pb.Image = $guiOriginalImg
+                        if ($guiOriginalPath -and (Test-Path -LiteralPath $guiOriginalPath)) {
+                            $script:guiMarginLoadedPath = try { (Resolve-Path -LiteralPath $guiOriginalPath -ErrorAction Stop).Path } catch { $guiOriginalPath }
+                        }
                         try { & $applyGmMarginBarsVisibility } catch {}
                         $btnViewOrig.Text = "トリム後を表示"
                         $form.Text = "$Title  ※ トリミング前の画像を表示中"
@@ -4536,15 +4664,65 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
     $btnDeleteMargin.UseVisualStyleBackColor = $true
     $btnDeleteMargin.Add_Click({
         # WinForms イベント内で Split-Path 等の cmdlet を呼ぶと PS7 で ParameterBindingException になることがあるため .NET のみ使用
-        # 表紙確認で「トリミング前を表示」中は、画面上の元画像（例: 001.jpg）を削除。未切替時は nav 上のファイル（多くは cvr_*）を削除。
+        # OkAppliesToCurrentView: 実際に読み込んだファイル（guiMarginLoadedPath）を正とする。nav の CurrentIdx だけに依存すると一覧ずれで誤削除する。
         $targetDel = $null
         if ($CoverConfirmMode -and $script:guiViewingOriginal -and -not [string]::IsNullOrWhiteSpace($guiOriginalPath) -and (Test-Path -LiteralPath $guiOriginalPath)) {
             try { $targetDel = (Resolve-Path -LiteralPath $guiOriginalPath -ErrorAction Stop).Path } catch { $targetDel = $guiOriginalPath }
+        } elseif ($OkAppliesToCurrentView) {
+            try { $targetDel = [string]$script:guiMarginLoadedPath } catch { $targetDel = $null }
+            if ([string]::IsNullOrWhiteSpace($targetDel)) {
+                $targetDel = if ($navList.Count -gt 0) { $navList[$script:guiMarginCurrentIdx] } else { $null }
+            }
         }
         if ([string]::IsNullOrWhiteSpace($targetDel)) {
             $targetDel = if ($navList.Count -gt 0) { $navList[$script:guiMarginCurrentIdx] } else { $baseImagePath }
         }
-        if ([string]::IsNullOrWhiteSpace($targetDel)) { $targetDel = $ImagePath }
+        if ([string]::IsNullOrWhiteSpace($targetDel)) { $targetDel = $imgPathResolvedForGui }
+
+        $loadedDbg = $null
+        try { $loadedDbg = $script:guiMarginLoadedPath } catch { }
+        $firstNavDbg = if ($navList.Count -gt 0) {
+            try { (Resolve-Path -LiteralPath $navList[0] -ErrorAction Stop).Path } catch { $navList[0] }
+        } else { '' }
+        $navCurDbg = if ($navList.Count -gt 0 -and $script:guiMarginCurrentIdx -ge 0 -and $script:guiMarginCurrentIdx -lt $navList.Count) {
+            try { (Resolve-Path -LiteralPath $navList[$script:guiMarginCurrentIdx] -ErrorAction Stop).Path } catch { $navList[$script:guiMarginCurrentIdx] }
+        } else { '' }
+        Write-FlickFitHost "[DeleteDbg] currentImagePath=$imgPathResolvedForGui" -ForegroundColor DarkGray
+        Write-FlickFitHost "[DeleteDbg] guiImagePath=$(try { [string]$script:guiMarginSessionImagePath } catch { '' })" -ForegroundColor DarkGray
+        Write-FlickFitHost "[DeleteDbg] loadedPath=$loadedDbg" -ForegroundColor DarkGray
+        Write-FlickFitHost "[DeleteDbg] deleteTargetPath=$targetDel" -ForegroundColor DarkGray
+        Write-FlickFitHost "[DeleteDbg] firstImage=$firstNavDbg" -ForegroundColor DarkGray
+        Write-FlickFitHost "[DeleteDbg] navCurrent=$navCurDbg idx=$($script:guiMarginCurrentIdx) navCount=$($navList.Count) coverPath=(n/a) OkApplies=$OkAppliesToCurrentView" -ForegroundColor DarkGray
+
+        if ($OkAppliesToCurrentView -and -not ($CoverConfirmMode -and $script:guiViewingOriginal)) {
+            if ([string]::IsNullOrWhiteSpace($loadedDbg)) {
+                [void][System.Windows.Forms.MessageBox]::Show(
+                    "削除対象の画像パスを特定できませんでした（内部状態不整合）。安全のため削除しません。`r`n[DeleteDbg] の loadedPath を確認してください。",
+                    "画像の削除",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning)
+                return
+            }
+            $ln = try { (Resolve-Path -LiteralPath $loadedDbg -ErrorAction Stop).Path } catch { $loadedDbg }
+            $tn = try { (Resolve-Path -LiteralPath $targetDel -ErrorAction Stop).Path } catch { $targetDel }
+            if ($ln -and $tn -and -not [string]::Equals($ln, $tn, [StringComparison]::OrdinalIgnoreCase)) {
+                [void][System.Windows.Forms.MessageBox]::Show(
+                    ("表示中のファイルと削除候補が一致しません。削除を中止します。`r`n表示: {0}`r`n候補: {1}" -f $ln, $tn),
+                    "画像の削除",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning)
+                return
+            }
+            if ($navList.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($navCurDbg) -and $ln -and -not [string]::Equals($ln, $navCurDbg, [StringComparison]::OrdinalIgnoreCase)) {
+                [void][System.Windows.Forms.MessageBox]::Show(
+                    ("ナビの現在インデックスと表示中ファイルが一致しません。削除を中止します。`r`n表示: {0}`r`nnav idx: {1}" -f $ln, $navCurDbg),
+                    "画像の削除",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning)
+                return
+            }
+        }
+
         $leaf = [System.IO.Path]::GetFileName($targetDel)
         if ([string]::IsNullOrWhiteSpace($leaf)) { $leaf = $targetDel }
         $msgDel = "次のファイルを削除しますか？`r`n" + $leaf
@@ -4554,6 +4732,8 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
         $mbDef2 = [System.Windows.Forms.MessageBoxDefaultButton]::Button2
         $confirm = [System.Windows.Forms.MessageBox]::Show($msgDel, $capDel, $mbYesNo, $mbWarn, $mbDef2)
         if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        $exBeforeDel = Test-Path -LiteralPath $targetDel
+        Write-FlickFitHost "[DeleteDbg] beforeDelete exists=$exBeforeDel path=$targetDel" -ForegroundColor DarkGray
         try { . $clearRotPreview } catch {}
         try {
             if ($null -ne $pb.Image) { $pb.Image.Dispose(); $pb.Image = $null }
@@ -4576,10 +4756,13 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
                     $imgMs = New-Object System.IO.MemoryStream(,([System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $targetDel).Path)))
                     $img = [System.Drawing.Image]::FromStream($imgMs)
                     $pb.Image = $img
+                    $script:guiMarginLoadedPath = try { (Resolve-Path -LiteralPath $targetDel -ErrorAction Stop).Path } catch { $targetDel }
                 } catch { Write-FlickFitHost "         [警告] 画像の再表示に失敗しました" -ForegroundColor Yellow }
             }
             return
         }
+        $exAfterDel = Test-Path -LiteralPath $targetDel
+        Write-FlickFitHost "[DeleteDbg] afterDelete exists=$exAfterDel path=$targetDel" -ForegroundColor DarkGray
         Write-FlickFitHost "         🗑 GUIから削除: $leaf" -ForegroundColor Yellow
         [void]$deletedInSession.Add($targetDel)
         $targetNorm = try { (Resolve-Path -LiteralPath $targetDel -ErrorAction Stop).Path } catch { $targetDel }
@@ -4608,8 +4791,9 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
                 if ($null -ne $btnViewOrig) { $btnViewOrig.Text = "トリミング前を表示" }
             }
         }
+        $delHash = @{ DeleteImage = $true; DeleteRequested = $true; ImagePath = $targetDel; DeleteTargetPath = $targetDel; DeletedImagePaths = @($deletedInSession.ToArray()) }
         if ($navList.Count -eq 0) {
-            $script:guiMarginDeleteResult = @{ DeleteImage = $true; ImagePath = $targetDel; DeletedImagePaths = @($deletedInSession.ToArray()) }
+            $script:guiMarginDeleteResult = $delHash
             $form.DialogResult = [System.Windows.Forms.DialogResult]::Abort
             return
         }
@@ -4622,7 +4806,7 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
         $showPath = $navList[$script:guiMarginCurrentIdx]
         try { & $applyGmMarginBarsVisibility } catch {}
         if (-not (& $loadPathIntoPreview $showPath)) {
-            $script:guiMarginDeleteResult = @{ DeleteImage = $true; ImagePath = $targetDel; DeletedImagePaths = @($deletedInSession.ToArray()) }
+            $script:guiMarginDeleteResult = $delHash
             $form.DialogResult = [System.Windows.Forms.DialogResult]::Abort
             return
         }
@@ -4669,9 +4853,52 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
         try { $pb.Invalidate($false) } catch {}
         try { & $updateGmRotChrome } catch {}
     })
+    $lblCovQuickRot = $null
+    $btnCovRotLeft = $null
+    $btnCovRotRight = $null
+    $btnCovRot180 = $null
+    if ($CoverConfirmMode) {
+        $lblCovQuickRot = New-Object System.Windows.Forms.Label
+        $lblCovQuickRot.Text = "回転:"
+        $lblCovQuickRot.AutoSize = $true
+        $lblCovQuickRot.Location = New-Object System.Drawing.Point($gmPadL, $gmYCovQuickRot)
+        $btnCovRotLeft = New-Object System.Windows.Forms.Button
+        $btnCovRotLeft.Text = "左90°"
+        $btnCovRotLeft.Location = New-Object System.Drawing.Point(56, ($gmYCovQuickRot - 2))
+        $btnCovRotLeft.Size = New-Object System.Drawing.Size(58, 26)
+        $btnCovRotLeft.UseVisualStyleBackColor = $true
+        $btnCovRotLeft.TabStop = $true
+        $btnCovRotRight = New-Object System.Windows.Forms.Button
+        $btnCovRotRight.Text = "右90°"
+        $btnCovRotRight.Location = New-Object System.Drawing.Point(118, ($gmYCovQuickRot - 2))
+        $btnCovRotRight.Size = New-Object System.Drawing.Size(58, 26)
+        $btnCovRotRight.UseVisualStyleBackColor = $true
+        $btnCovRotRight.TabStop = $true
+        $btnCovRot180 = New-Object System.Windows.Forms.Button
+        $btnCovRot180.Text = "180°"
+        $btnCovRot180.Location = New-Object System.Drawing.Point(180, ($gmYCovQuickRot - 2))
+        $btnCovRot180.Size = New-Object System.Drawing.Size(52, 26)
+        $btnCovRot180.UseVisualStyleBackColor = $true
+        $btnCovRot180.TabStop = $true
+        $ttCovQRot = New-Object System.Windows.Forms.ToolTip
+        $ttCovQRot.AutoPopDelay = 20000
+        $ttCovQRot.InitialDelay = 200
+        $tipCovQBase = "表紙候補のみ。元ファイルは書き換えず cvr_rot_* へ保存してプレビュー更新。自動回転しません。上の「回転モード」は微調整（±45°）用です。"
+        [void]$ttCovQRot.SetToolTip($btnCovRotLeft, "${tipCovQBase} 反時計回りに90°。")
+        [void]$ttCovQRot.SetToolTip($btnCovRotRight, "${tipCovQBase} 時計回りに90°。")
+        [void]$ttCovQRot.SetToolTip($btnCovRot180, "${tipCovQBase} 180°。")
+        [void]$ttCovQRot.SetToolTip($lblCovQuickRot, $tipCovQBase)
+        $btnCovRotLeft.Add_Click({ try { & $applyCoverQuick90Rotate -AngleDeg -90 -UiLabel "表紙 左90°" } catch { } })
+        $btnCovRotRight.Add_Click({ try { & $applyCoverQuick90Rotate -AngleDeg 90 -UiLabel "表紙 右90°" } catch { } })
+        $btnCovRot180.Add_Click({ try { & $applyCoverQuick90Rotate -AngleDeg 180 -UiLabel "表紙 180°" } catch { } })
+    }
     $pnlCtrls = [System.Collections.Generic.List[object]]::new()
     if ($null -ne $tbReviewSum) { [void]$pnlCtrls.Add($tbReviewSum) }
-    foreach ($x in @($lblSizeInfo, $lblRotDeg, $nudRot, $btnRotPreview, $btnRotAdoptAngle, $chkSpecifyGutter, $lblHint, $lblGutter, $txtGutter, $lblL, $txtLeft, $lblR, $txtRight, $lblTopM, $txtTop, $lblBotM, $txtBottom, $btnRotationMode, $lblRotTestIntro, $btnOk, $btnCancel, $btnPhotos)) { [void]$pnlCtrls.Add($x) }
+    foreach ($x in @($lblSizeInfo, $lblRotDeg, $nudRot, $btnRotPreview, $btnRotAdoptAngle, $chkSpecifyGutter, $lblHint)) { [void]$pnlCtrls.Add($x) }
+    if ($null -ne $lblCovQuickRot) {
+        foreach ($x in @($lblCovQuickRot, $btnCovRotLeft, $btnCovRotRight, $btnCovRot180)) { [void]$pnlCtrls.Add($x) }
+    }
+    foreach ($x in @($lblGutter, $txtGutter, $lblL, $txtLeft, $lblR, $txtRight, $lblTopM, $txtTop, $lblBotM, $txtBottom, $btnRotationMode, $lblRotTestIntro, $btnOk, $btnCancel, $btnPhotos)) { [void]$pnlCtrls.Add($x) }
     if ($null -ne $btnApplyOne) { [void]$pnlCtrls.Add($btnApplyOne) }
     if ($btnCovSplit) { [void]$pnlCtrls.Add($btnCovSplit); [void]$pnlCtrls.Add($btnCovSkip) }
     if ($null -ne $btnViewOrig) { [void]$pnlCtrls.Add($btnViewOrig) }
@@ -4742,6 +4969,7 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
         $script:guiMarginDeleteResult = $null
         if ($null -ne $dr -and $dr -is [System.Collections.IDictionary] -and $deletedInSession.Count -gt 0) {
             $dr['DeletedImagePaths'] = @($deletedInSession.ToArray())
+            $dr['DeleteRequested'] = $true
         }
         if ($CoverConfirmMode -and $null -ne $dr -and $dr -is [System.Collections.IDictionary]) { $dr['CoverAction'] = 'D' }
         return $dr
@@ -4759,14 +4987,22 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
                 # 表紙ループの [m] 分岐で1回だけフォトを開き Read-Host する（二重表示・二重待ちを防ぐ）
                 $dimsAfter = Get-ImageDimensions -Path $pathForPhotos
                 $ret = @{ PhotosEdit = $true; ImagePath = $pathForPhotos; Width = if ($dimsAfter.Width -gt 0) { $dimsAfter.Width } else { $null }; Height = if ($dimsAfter.Height -gt 0) { $dimsAfter.Height } else { $null } }
-                if ($deletedInSession.Count -gt 0) { $ret['DeletedImagePaths'] = @($deletedInSession.ToArray()) }
+                if ($deletedInSession.Count -gt 0) {
+                    $ret['DeletedImagePaths'] = @($deletedInSession.ToArray())
+                    $ret['DeleteImage'] = $true
+                    $ret['DeleteRequested'] = $true
+                }
             } else {
                 try { Invoke-PhotosOpen -ImagePath $pathForPhotos } catch { try { Start-Process -FilePath $pathForPhotos } catch { Write-FlickFitHost "         [警告] 画像を開けませんでした" -ForegroundColor Yellow } }
                 Write-FlickFitHost "         ※ フォトで編集・保存したら Enter で続行（フォトで保存した画像を基準として以降のトリミングに採用）" -ForegroundColor Yellow
                 Read-HostWithEsc "         [確認]"
                 $dimsAfter = Get-ImageDimensions -Path $pathForPhotos
                 $ret = @{ PhotosEdit = $true; ImagePath = $pathForPhotos; Width = if ($dimsAfter.Width -gt 0) { $dimsAfter.Width } else { $null }; Height = if ($dimsAfter.Height -gt 0) { $dimsAfter.Height } else { $null } }
-                if ($deletedInSession.Count -gt 0) { $ret['DeletedImagePaths'] = @($deletedInSession.ToArray()) }
+                if ($deletedInSession.Count -gt 0) {
+                    $ret['DeletedImagePaths'] = @($deletedInSession.ToArray())
+                    $ret['DeleteImage'] = $true
+                    $ret['DeleteRequested'] = $true
+                }
             }
         }
         Remove-Variable -Name guiMarginPhotosEditPath -Scope Script -ErrorAction SilentlyContinue
@@ -4908,7 +5144,16 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
                 $script:guiMarginApplyOnlyThisPage = $false
             }
             if ($CoverConfirmMode) { $ret['CoverAction'] = '1' }
-            if ($deletedInSession.Count -gt 0) { $ret['DeletedImagePaths'] = @($deletedInSession.ToArray()) }
+            if ($deletedInSession.Count -gt 0) {
+                $dpArrOk = @($deletedInSession.ToArray())
+                $ret['DeletedImagePaths'] = $dpArrOk
+                $ret['DeleteImage'] = $true
+                $ret['DeleteRequested'] = $true
+                try {
+                    $lastDOk = $dpArrOk[$dpArrOk.Count - 1]
+                    $ret['DeleteTargetPath'] = try { (Resolve-Path -LiteralPath $lastDOk -ErrorAction Stop).Path } catch { [string]$lastDOk }
+                } catch { }
+            }
             if ($null -ne $ret -and $ret -is [System.Collections.IDictionary]) {
                 $ret['RotationModeActive'] = [bool]$script:guiMarginRotationMode
                 if ($rotPrevWasActive) { $ret['RotationPreviewUsedAtOk'] = $true }
@@ -4933,7 +5178,16 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
                 $script:guiMarginApplyOnlyThisPage = $false
             }
             if ($CoverConfirmMode) { $ret['CoverAction'] = '1' }
-            if ($deletedInSession.Count -gt 0) { $ret['DeletedImagePaths'] = @($deletedInSession.ToArray()) }
+            if ($deletedInSession.Count -gt 0) {
+                $dpArr2 = @($deletedInSession.ToArray())
+                $ret['DeletedImagePaths'] = $dpArr2
+                $ret['DeleteImage'] = $true
+                $ret['DeleteRequested'] = $true
+                try {
+                    $lastD2 = $dpArr2[$dpArr2.Count - 1]
+                    $ret['DeleteTargetPath'] = try { (Resolve-Path -LiteralPath $lastD2 -ErrorAction Stop).Path } catch { [string]$lastD2 }
+                } catch { }
+            }
             if ($null -ne $ret -and $ret -is [System.Collections.IDictionary]) {
                 $ret['RotationModeActive'] = [bool]$script:guiMarginRotationMode
             }
@@ -4949,7 +5203,12 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
         return @{ CoverAction = 'N' }
     }
     if ($null -eq $ret -and $deletedInSession.Count -gt 0) {
-        $ret = @{ DeletedImagePaths = @($deletedInSession.ToArray()) }
+        $dpFallback = @($deletedInSession.ToArray())
+        $ret = @{ DeletedImagePaths = $dpFallback; DeleteImage = $true; DeleteRequested = $true }
+        try {
+            $lastFb = $dpFallback[$dpFallback.Count - 1]
+            $ret['DeleteTargetPath'] = try { (Resolve-Path -LiteralPath $lastFb -ErrorAction Stop).Path } catch { [string]$lastFb }
+        } catch { }
     }
     . $disposeGmRotPreviewBmp
     if ($img) { $img.Dispose() }
@@ -6754,7 +7013,7 @@ function Invoke-SplitWidthValidation {
         $guiFirst = Read-HostWithEsc "         [1]採用 [2]ノド再設定 [3]詳細 [4]自動採用 [D]削除"
     }
     if ($guiFirst -is [System.Collections.IDictionary]) {
-        if (Test-GuiMarginFlagTrue -Tbl $guiFirst -Key 'DeleteImage') {
+        if (Test-FlickFitGutterGuiDeleteRequested -Tbl $guiFirst) {
             return (Invoke-FlickFitSplitWidthDecision -Route DeletePaths -ImgName $ImgName -GutterCacheFolderKey $GutterCacheFolderKey -PathsForDelete @($SplitPath1, $SplitPath2, $OrigPath))
         }
         if (Test-GuiMarginFlagTrue -Tbl $guiFirst -Key 'PhotosEdit') {
@@ -15781,7 +16040,7 @@ if __name__ == "__main__":
                                 } else {
                                     if ($caGm) { $confirm = [string]$caGm } else { $confirm = 'N' }
                                 }
-                            } elseif (Test-GuiMarginFlagTrue -Tbl $gmCv -Key 'DeleteImage') {
+                            } elseif (Test-FlickFitGutterGuiDeleteRequested -Tbl $gmCv) {
                                 $confirm = 'D'
                             } else {
                                 $confirm = 'N'
@@ -16163,7 +16422,7 @@ if __name__ == "__main__":
                                     }
                                 }
                                 $hadGui2SessionDeletes = ($gui2DeletedPaths.Count -gt 0)
-                                if (Test-GuiMarginFlagTrue -Tbl $guiResult2 -Key 'DeleteImage') {
+                                if (Test-FlickFitGutterGuiDeleteRequested -Tbl $guiResult2) {
                                     Write-FlickFitHost "         ↩ GUI削除を反映しました。一覧を更新し、次の画像から再評価します" -ForegroundColor DarkGray
                                     $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
                                     $coverLoopImgsRefreshed = $true
@@ -16464,7 +16723,7 @@ if __name__ == "__main__":
                                         }
                                     }
                                     $hadM4SessionDeletes = ($m4DeletedPaths.Count -gt 0)
-                                    if (Test-GuiMarginFlagTrue -Tbl $guiM4 -Key 'DeleteImage') {
+                                    if (Test-FlickFitGutterGuiDeleteRequested -Tbl $guiM4) {
                                         Write-FlickFitHost "         ↩ GUI削除を反映しました。一覧を更新し、次の画像から再評価します" -ForegroundColor DarkGray
                                         $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
                                         $coverLoopImgsRefreshed = $true
@@ -16856,7 +17115,7 @@ if __name__ == "__main__":
                             }
                         }
                         $hadPcSessionDeletes = ($pcDeletedPaths.Count -gt 0)
-                        if (Test-GuiMarginFlagTrue -Tbl $guiPc -Key 'DeleteImage') {
+                        if (Test-FlickFitGutterGuiDeleteRequested -Tbl $guiPc) {
                             Write-FlickFitHost "         ↩ GUI削除を反映しました。一覧を更新し、次の画像から再評価します" -ForegroundColor DarkGray
                             $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
                             if ($imgIdx -ge $imgs.Count) { $imgIdx = $imgs.Count; continue }
@@ -17145,7 +17404,7 @@ if __name__ == "__main__":
                                     $navOs = Get-FlickFitGutterEntryAfterNavGui -EntryPath $entryPathStep5 -EntryName $entryNameStep5 -GuiResult $guiOs
                                     if ($null -ne $navOs) { $origPath = $navOs.OrigPath; $imgName = $navOs.ImgName; $ext = $navOs.Ext }
                                     Write-FlickFitStep5EntryDebug -Label 'os-after' -EntryPath $entryPathStep5 -GuiResult $guiOs -ApplyPath $origPath -ImgIdx $imgIdx -ImgsCount $imgs.Count
-                                    if (Test-GuiMarginFlagTrue -Tbl $guiOs -Key 'DeleteImage') {
+                                    if (Test-FlickFitGutterGuiDeleteRequested -Tbl $guiOs) {
                                         if (Test-Path -LiteralPath $tempBackupOs) { Remove-Item -LiteralPath $tempBackupOs -Force -ErrorAction SilentlyContinue }
                                         if (Test-Path -LiteralPath $so1) { Remove-Item -LiteralPath $so1 -Force -ErrorAction SilentlyContinue }
                                         if (Test-Path -LiteralPath $so2) { Remove-Item -LiteralPath $so2 -Force -ErrorAction SilentlyContinue }
@@ -17349,7 +17608,7 @@ if __name__ == "__main__":
                                         $navRsOs = Get-FlickFitGutterEntryAfterNavGui -EntryPath $gutterReselectEntryOs -EntryName $imgName -GuiResult $gxOs
                                         if ($null -ne $navRsOs) { $origPath = $navRsOs.OrigPath; $imgName = $navRsOs.ImgName; $ext = $navRsOs.Ext }
                                         Write-FlickFitStep5EntryDebug -Label 'rsos-after' -EntryPath $entryPathStep5 -GuiResult $gxOs -ApplyPath $origPath -ImgIdx $imgIdx -ImgsCount $imgs.Count
-                                        if (Test-GuiMarginFlagTrue -Tbl $gxOs -Key 'DeleteImage') {
+                                        if (Test-FlickFitGutterGuiDeleteRequested -Tbl $gxOs) {
                                             if (Test-Path -LiteralPath $tempBackupOs) { Remove-Item -LiteralPath $tempBackupOs -Force -ErrorAction SilentlyContinue }
                                             if (Test-Path -LiteralPath $so1) { Remove-Item -LiteralPath $so1 -Force -ErrorAction SilentlyContinue }
                                             if (Test-Path -LiteralPath $so2) { Remove-Item -LiteralPath $so2 -Force -ErrorAction SilentlyContinue }
@@ -17647,7 +17906,7 @@ if __name__ == "__main__":
                                     $navCst = Get-FlickFitGutterEntryAfterNavGui -EntryPath $entryPathStep5 -EntryName $entryNameStep5 -GuiResult $guiCst
                                     if ($null -ne $navCst) { $origPath = $navCst.OrigPath; $imgName = $navCst.ImgName; $ext = $navCst.Ext }
                                     Write-FlickFitStep5EntryDebug -Label 'cst-after' -EntryPath $entryPathStep5 -GuiResult $guiCst -ApplyPath $origPath -ImgIdx $imgIdx -ImgsCount $imgs.Count
-                                    if (Test-GuiMarginFlagTrue -Tbl $guiCst -Key 'DeleteImage') {
+                                    if (Test-FlickFitGutterGuiDeleteRequested -Tbl $guiCst) {
                                         $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
                                         $processedImages++
                                         $imgIdx++
@@ -17791,6 +18050,7 @@ if __name__ == "__main__":
                         } elseif ($folderCoverWidth -gt 0) { Write-FlickFitDebugStep5VerboseHost -Text "[DEBUG] 表紙幅=$folderCoverWidth px で分割・表紙比較を適用" -ForegroundColor DarkYellow }
                         try {
                             $bBalancedMarginTrimResultDone = $false
+                            $result = $null
                             $balancedFreshGutterGuiUsed = $false
                             # BALANCED: 実入力パスと寸法（キャッシュ経路・GUI while・try 外の検証まで引き回し。GUI 内で $origPath / Apply 先が変わるたび再同期する）
                             $effectiveInputPathBal = [string]$origPath
@@ -18070,7 +18330,17 @@ if __name__ == "__main__":
                                     $navBal = Get-FlickFitGutterEntryAfterNavGui -EntryPath $gutterEntryBal -EntryName ([System.IO.Path]::GetFileName($gutterEntryBal)) -GuiResult $guiBal
                                     if ($null -ne $navBal) { $origPath = $navBal.OrigPath; $imgName = $navBal.ImgName; $ext = $navBal.Ext }
                                     Write-FlickFitStep5EntryDebug -Label 'bal-after' -EntryPath $entryPathStep5 -GuiResult $guiBal -ApplyPath $origPath -ImgIdx $imgIdx -ImgsCount $imgs.Count
-                                    if (Test-GuiMarginFlagTrue -Tbl $guiBal -Key 'DeleteImage') {
+                                    if (Test-FlickFitGutterGuiDeleteRequested -Tbl $guiBal) {
+                                        Ensure-FlickFitStep5ErrorRetryCount
+                                        if ($guiBal.ContainsKey('DeletedImagePaths') -and $guiBal['DeletedImagePaths']) {
+                                            foreach ($dpClr in @($guiBal['DeletedImagePaths'])) {
+                                                if (-not $dpClr) { continue }
+                                                $kDp = Get-FlickFitStep5ErrorRetryKey -Path ([string]$dpClr)
+                                                if (-not [string]::IsNullOrWhiteSpace($kDp) -and $script:Step5ErrorRetryCount.ContainsKey($kDp)) { [void]$script:Step5ErrorRetryCount.Remove($kDp) }
+                                            }
+                                        }
+                                        $kEntBal = Get-FlickFitStep5ErrorRetryKey -Path $entryPathStep5
+                                        if (-not [string]::IsNullOrWhiteSpace($kEntBal) -and $script:Step5ErrorRetryCount.ContainsKey($kEntBal)) { [void]$script:Step5ErrorRetryCount.Remove($kEntBal) }
                                         $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
                                         if (Test-Path -LiteralPath $tempBackupB) { Remove-Item -LiteralPath $tempBackupB -Force -ErrorAction SilentlyContinue }
                                         $processedImages++
@@ -18147,6 +18417,47 @@ if __name__ == "__main__":
                                         }
                                         $joinedBal = ($output | ForEach-Object { "$_" }) -join ""
                                         if (Test-FlickFitStep5StringLooksLikeResultError -S ([string]$joinedBal)) {
+                                            $guiDeletedThisEntry = $false
+                                            if ($guiBal -is [System.Collections.IDictionary] -and $guiBal.ContainsKey('DeletedImagePaths') -and $guiBal['DeletedImagePaths']) {
+                                                $entKeyErr = Get-FlickFitStep5ErrorRetryKey -Path $entryPathStep5
+                                                foreach ($delPE in @($guiBal['DeletedImagePaths'])) {
+                                                    if (-not $delPE) { continue }
+                                                    $delKeyE = Get-FlickFitStep5ErrorRetryKey -Path ([string]$delPE)
+                                                    if (-not [string]::IsNullOrWhiteSpace($entKeyErr) -and -not [string]::IsNullOrWhiteSpace($delKeyE) -and [string]::Equals($delKeyE, $entKeyErr, [StringComparison]::OrdinalIgnoreCase)) {
+                                                        $guiDeletedThisEntry = $true
+                                                        break
+                                                    }
+                                                }
+                                            }
+                                            if ($guiDeletedThisEntry) {
+                                                Write-FlickFitHost "         [DeleteDbg] GUI 削除済みエントリのため Python エラーを無視し retry / 復元しません ($imgName)" -ForegroundColor DarkCyan
+                                                Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=$(Test-Path -LiteralPath $entryPathStep5) entry=$entryPathStep5 skip=gui_deleted_entry") -ForegroundColor DarkYellow
+                                                Ensure-FlickFitStep5ErrorRetryCount
+                                                $kSkipGui = Get-FlickFitStep5ErrorRetryKey -Path $entryPathStep5
+                                                if (-not [string]::IsNullOrWhiteSpace($kSkipGui) -and $script:Step5ErrorRetryCount.ContainsKey($kSkipGui)) { [void]$script:Step5ErrorRetryCount.Remove($kSkipGui) }
+                                                $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
+                                                if (Test-Path -LiteralPath $tempBackupB) { Remove-Item -LiteralPath $tempBackupB -Force -ErrorAction SilentlyContinue }
+                                                $processedImages++
+                                                $imgIdx++
+                                                $balGuiLoop = $false
+                                                $output = @('BAL_DELETE_CONTINUE')
+                                                break
+                                            }
+                                            if (-not (Test-Path -LiteralPath $entryPathStep5)) {
+                                                Write-FlickFitHost "         ↩ GUI 削除などで元画像が無いため retry / trim_only を行いません ($entryNameStep5)" -ForegroundColor DarkGray
+                                                Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=False entry=$entryPathStep5 skip=missing_entry_inner") -ForegroundColor DarkYellow
+                                                Ensure-FlickFitStep5ErrorRetryCount
+                                                $kMissIn = Get-FlickFitStep5ErrorRetryKey -Path $entryPathStep5
+                                                if (-not [string]::IsNullOrWhiteSpace($kMissIn) -and $script:Step5ErrorRetryCount.ContainsKey($kMissIn)) { [void]$script:Step5ErrorRetryCount.Remove($kMissIn) }
+                                                if (Test-Path -LiteralPath $tempBackupB) { Remove-Item -LiteralPath $tempBackupB -Force -ErrorAction SilentlyContinue }
+                                                $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
+                                                $processedImages++
+                                                $imgIdx++
+                                                $balGuiLoop = $false
+                                                $output = @('BAL_DELETE_CONTINUE')
+                                                break
+                                            }
+                                            Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=$(Test-Path -LiteralPath $entryPathStep5) entry=$entryPathStep5") -ForegroundColor DarkYellow
                                             $actInner = Get-FlickFitStep5RetryAction -Path $entryPathStep5 -MaxRetryBeforeFallback 2
                                             # 1〜2 回目: 再GUI。3 回目: 無限ループ防止の trim_only
                                             if ($actInner -eq 'fallback') {
@@ -18174,6 +18485,7 @@ if __name__ == "__main__":
                                                 break
                                             }
                                             Write-FlickFitHost "         ⚠ GUI後の適用に失敗しました。元画像を復元し、ノド/余白を再設定してください" -ForegroundColor Yellow
+                                            Write-FlickFitHost ("[STEP5RetryGui] entryPathStep5={0} imgName={1} origPath={2} (次ループで GUI ImagePath は entry に同期)" -f $entryPathStep5, $imgName, $origPath) -ForegroundColor DarkYellow
                                             if (Test-Path -LiteralPath $tempBackupB) {
                                                 Copy-Item -LiteralPath $tempBackupB -Destination $entryPathStep5 -Force -ErrorAction SilentlyContinue
                                             }
@@ -18255,16 +18567,16 @@ if __name__ == "__main__":
                                     # 4 または空: GUI を再表示
                                 }
                                 if (($output.Count -eq 1) -and ($output[0] -eq 'BAL_DELETE_CONTINUE')) {
-                                    continue
+                                    continue FlickFitStep5ImgLoop
                                 }
                                 if (($output.Count -eq 1) -and ($output[0] -eq 'BAL_PHOTOS_CONTINUE')) {
-                                    continue
+                                    continue FlickFitStep5ImgLoop
                                 }
                                 if (($output.Count -eq 1) -and ($output[0] -eq 'BAL_MARGIN_DONE')) {
-                                    continue
+                                    continue FlickFitStep5ImgLoop
                                 }
                                 if (($output.Count -eq 1) -and ($output[0] -eq 'BAL_TRIM_ERR_FALLBACK')) {
-                                    continue
+                                    continue FlickFitStep5ImgLoop
                                 }
                             } else {
                                 $output = & $script:PythonExe $workTrimSplitPy $effectiveInputPathBal $RightBinding.ToString() $splitMode "" $aspectMin $aspectRef $cwM 2>&1
@@ -18327,7 +18639,7 @@ if __name__ == "__main__":
                                             $navRedoB = Get-FlickFitGutterEntryAfterNavGui -EntryPath $gutterEntryRedoB -EntryName $imgName -GuiResult $guiRedoB
                                             if ($null -ne $navRedoB) { $origPath = $navRedoB.OrigPath; $imgName = $navRedoB.ImgName; $ext = $navRedoB.Ext }
                                             Write-FlickFitStep5EntryDebug -Label 'redob-after' -EntryPath $entryPathStep5 -GuiResult $guiRedoB -ApplyPath $origPath -ImgIdx $imgIdx -ImgsCount $imgs.Count
-                                            if (Test-GuiMarginFlagTrue -Tbl $guiRedoB -Key 'DeleteImage') {
+                                            if (Test-FlickFitGutterGuiDeleteRequested -Tbl $guiRedoB) {
                                                 foreach ($pDel in @($origPathAtAspectWarn, $so1bAtAspect, $so2bAtAspect)) {
                                                     if (Test-Path -LiteralPath $pDel) { Remove-Item -LiteralPath $pDel -Force -ErrorAction SilentlyContinue }
                                                 }
@@ -18534,7 +18846,7 @@ if __name__ == "__main__":
                                     $navReGr = Get-FlickFitGutterEntryAfterNavGui -EntryPath $gutterReGr -EntryName $imgName -GuiResult $gxGuiVal
                                     if ($null -ne $navReGr) { $origPath = $navReGr.OrigPath; $imgName = $navReGr.ImgName; $ext = $navReGr.Ext }
                                     Write-FlickFitStep5EntryDebug -Label 'regr-after' -EntryPath $entryPathStep5 -GuiResult $gxGuiVal -ApplyPath $origPath -ImgIdx $imgIdx -ImgsCount $imgs.Count
-                                    if (Test-GuiMarginFlagTrue -Tbl $gxGuiVal -Key 'DeleteImage') {
+                                    if (Test-FlickFitGutterGuiDeleteRequested -Tbl $gxGuiVal) {
                                         if (Test-Path -LiteralPath $tempBackupB) { Remove-Item -LiteralPath $tempBackupB -Force -ErrorAction SilentlyContinue }
                                         if (Test-Path -LiteralPath $so1b) { Remove-Item -LiteralPath $so1b -Force -ErrorAction SilentlyContinue }
                                         if (Test-Path -LiteralPath $so2b) { Remove-Item -LiteralPath $so2b -Force -ErrorAction SilentlyContinue }
@@ -18713,6 +19025,17 @@ if __name__ == "__main__":
                                 $fatMsg = [string]$result
                                 if ($fatMsg -match '(?i)^ERROR:\s*(.+)$') { $fatMsg = $Matches[1].Trim() } else { $fatMsg = $fatMsg.Trim() }
                                 throw [System.InvalidOperationException]::new($fatMsg)
+                            }
+                            if ($isErrRes -and -not (Test-Path -LiteralPath $entryPathStep5)) {
+                                Write-FlickFitHost "         ↩ 処理対象の元画像が無いため retry / trim_only をスキップします（削除済みなど）: $entryNameStep5" -ForegroundColor DarkGray
+                                Ensure-FlickFitStep5ErrorRetryCount
+                                $kMissOut = Get-FlickFitStep5ErrorRetryKey -Path $entryPathStep5
+                                if (-not [string]::IsNullOrWhiteSpace($kMissOut) -and $script:Step5ErrorRetryCount.ContainsKey($kMissOut)) { [void]$script:Step5ErrorRetryCount.Remove($kMissOut) }
+                                if (Test-Path -LiteralPath $tempBackupB) { Remove-Item -LiteralPath $tempBackupB -Force -ErrorAction SilentlyContinue }
+                                $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
+                                $processedImages++
+                                $imgIdx++
+                                continue FlickFitStep5ImgLoop
                             }
                             $actOuter = $null
                             if ($isErrRes) { $actOuter = Get-FlickFitStep5RetryAction -Path $entryPathStep5 -MaxRetryBeforeFallback 2 }
