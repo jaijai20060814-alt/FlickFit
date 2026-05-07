@@ -74,9 +74,9 @@ function Format-FlickFitPublicLogString {
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
     if (-not $script:FlickFitPublicMode) { return $Text }
     $t = $Text
-    $home = $env:USERPROFILE
-    if ($home -and ($t -like "*$home*")) {
-        try { $t = $t.Replace($home, '~') } catch {}
+    $userProfilePath = [string]$env:USERPROFILE
+    if (-not [string]::IsNullOrWhiteSpace($userProfilePath)) {
+        try { $t = $t.Replace($userProfilePath, '~') } catch {}
     }
     foreach ($w in $script:FlickFitNgWordList) {
         if ([string]::IsNullOrWhiteSpace($w)) { continue }
