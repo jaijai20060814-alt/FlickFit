@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    FlickFit v1.0.0 - 画像をフリックに最適化する自動処理エンジン
+    FlickFit v1.0.1 - 画像をフリックに最適化する自動処理エンジン
     作品名フォルダを指定して自動実行: 解凍→巻数/重複判定→作品名取得→フォルダ整理→表紙トリミング→見開き分割→RAR圧縮→作業フォルダ削除
     ※ 複数作品は別々のスクリプトインスタンスで並列実行可能
     [CRITICAL FIX] STEP7 元ファイル削除: selectedExistingFolders（既存作業フォルダ）をアーカイブ廃棄対象に混在させてフォルダごと削除していた不具合を排除。解凍元は ArchiveExtensions かつファイルのみ。
@@ -9,7 +9,7 @@
     [UX] STEP7: クリーンアップは UserConfig に CleanupWorkingFolders・KeepSourceArchives 両方があるとき確認省略（それ以外は STEP7-1 / STEP7-2 の2段子確認）。配布既定: 作業は削除寄り・元アーカイブは保持寄り
 
 .NOTES
-    パッケージ版 v1.0.0（2026-05-06 初回公開）。要約は CHANGELOG.md / README.md。
+    パッケージ版 v1.0.1（2026-05-07）。要約は CHANGELOG.md / README.md。
 
     開発履歴（参考・抜粋） ― v1.3.0 - モジュール細分化:
             [REFACTOR] Read-HostWithEsc・Parse-RangeInput・巻/話ヘルパーは Modules\Utils.ps1 / VolumeContext.ps1 に一本化（メインの重複定義を削除）
@@ -86,6 +86,7 @@
     v10.1+ - UserConfig.json に AutoJudge（Preset: standard/lenient/custom 等）を任意指定可能。FlickFitLauncher「詳細オプション…」で GUI から保存可（手編集JSON不要の前提用）
     v10.1+ - STEP5 デバッグ: $script:FlickFitDebugStep5Entry = $true で [STEP5EntryDbg] ＋ BAL 見開き Python 直前 [STEP5GuiApply]（lock/branch/LTRB）。別画像OK時の [注意] 行は Split-Path 混線回避（Get-LiteralPathLeaf）
     v10.1+ - STEP5 ログ詳細: $script:FlickFitDebugStep5Verbose = $true で [DEBUG] 表紙幅 / [AutoGutter] / [PixelLoss] / [SplitWidthVal] / 分割幅の黄色警告 等。通常時は [参考表示]… の1行＋短い要約
+    v1.0.1+ - STEP5 GUI 削除・リトライ調査ログ（既定 OFF）: $script:FlickFitDebugStep5Delete（[DeleteDbg]）/ $script:FlickFitDebugStep5Retry（[STEP5RetryDbg][STEP5RetryGui]）/ $script:FlickFitDebugGuiMarginNav（[GuiMarginNav]）
     v10.1+ - STEP1 構造解析サマリ: 巻内で 特別編/おまけ/番外 等のキーワードを巻の末尾（話数の後）にソート（無効: $FlickFitDisableOmakeEndOfVolSort）
     v10.1+ - STEP1 構造解析サマリ一行表示: 長い作品名を削り 第N巻+リーフ中心、幅超過時はリーフを中略（末尾近くを優先）
     v10.1+ - STEP1 構造解析サマリ: 行番号<>行番号 で同分類内の前後順のみ入替（巻・話 Ctx 不変）／終了時 Leaf の処理順を一覧と揃える
@@ -1022,6 +1023,12 @@ if (-not (Get-Variable -Name FlickFitDebugStep5Entry -Scope Script -ErrorAction 
 # STEP5: 表紙幅[DEBUG] / [AutoGutter] / [PixelLoss] / [SplitWidthVal] / 分割幅の警告行 / キャッシュ行 / ノド→Python 詳細 等（既定: 出さない。$script:FlickFitDebugStep5Verbose = $true）
 if (-not (Get-Variable -Name FlickFitDebugStep5Verbose -Scope Script -ErrorAction SilentlyContinue)) { $script:FlickFitDebugStep5Verbose = $false }
 if (-not (Get-Variable -Name FlickFitDebugSourceArchiveDelete -Scope Script -ErrorAction SilentlyContinue)) { $script:FlickFitDebugSourceArchiveDelete = $false }
+# STEP5: GUI 削除パス・削除前後 exists 等（[DeleteDbg]。既定 OFF）
+if (-not (Get-Variable -Name FlickFitDebugStep5Delete -Scope Script -ErrorAction SilentlyContinue)) { $script:FlickFitDebugStep5Delete = $false }
+# STEP5: エラー retry / fallback カウント詳細（[STEP5RetryDbg] / [STEP5RetryGui]。既定 OFF）
+if (-not (Get-Variable -Name FlickFitDebugStep5Retry -Scope Script -ErrorAction SilentlyContinue)) { $script:FlickFitDebugStep5Retry = $false }
+# ノド・余白 GUI: nav へ ImagePath を追補したとき（[GuiMarginNav]。既定 OFF）
+if (-not (Get-Variable -Name FlickFitDebugGuiMarginNav -Scope Script -ErrorAction SilentlyContinue)) { $script:FlickFitDebugGuiMarginNav = $false }
 if (-not (Get-Variable -Name SourceArchivePathsForStep7Delete -Scope Script -ErrorAction SilentlyContinue)) { $script:SourceArchivePathsForStep7Delete = @() }
 
 function Write-FlickFitDebugStep5VerboseHost {
@@ -2640,7 +2647,7 @@ function Test-FlickFitStep5StringLooksLikeResultError {
     return $false
 }
 # 1〜2 回目 retry、3 回目 fallback（MaxRetryBeforeFallback=2 → n=3 のとき n -gt 2）
-# 抑止: $script:FlickFitDebugStep5Retry = $false
+# 詳細ログ: $script:FlickFitDebugStep5Retry = $true
 function Get-FlickFitStep5RetryAction {
     param(
         [string]$Path,
@@ -2653,16 +2660,14 @@ function Get-FlickFitStep5RetryAction {
     }
     if ([string]::IsNullOrWhiteSpace($key)) {
         $key = 'STEP5_RETRY_KEY_EMPTY'
-        if (-not ($true -eq $script:FlickFitObsDisable)) { Write-FlickFitWarning "[STEP5RetryDbg] キー空のため仮キーで加算（Path 不整合の可能性）" }
+        if (($true -eq $script:FlickFitDebugStep5Retry) -and -not ($true -eq $script:FlickFitObsDisable)) { Write-FlickFitWarning "[STEP5RetryDbg] キー空のため仮キーで加算（Path 不整合の可能性）" }
     }
     $n = 0
     if ($script:Step5ErrorRetryCount.ContainsKey($key)) { try { $n = [int]$script:Step5ErrorRetryCount[$key] } catch { $n = 0 } }
     $n++
     $script:Step5ErrorRetryCount[$key] = $n
     $act = if ($n -gt $MaxRetryBeforeFallback) { 'fallback' } else { 'retry' }
-    $showStep5RetryDbg = $true
-    if (Get-Variable -Name FlickFitDebugStep5Retry -Scope Script -ErrorAction SilentlyContinue) { if ($false -eq $script:FlickFitDebugStep5Retry) { $showStep5RetryDbg = $false } }
-    if ($showStep5RetryDbg) {
+    if ($true -eq $script:FlickFitDebugStep5Retry) {
         Write-FlickFitHost ("[STEP5RetryDbg] key={0}" -f $key) -ForegroundColor DarkYellow
         Write-FlickFitHost ("[STEP5RetryDbg] count={0}" -f $n) -ForegroundColor DarkYellow
         Write-FlickFitHost ("[STEP5RetryDbg] action={0}" -f $act) -ForegroundColor DarkYellow
@@ -2770,7 +2775,7 @@ function Show-GutterMarginSetGui {
         if (-not $anchorFoundInNav -and $imgPathResolvedForGui -and (Test-Path -LiteralPath $imgPathResolvedForGui)) {
             [void]$navList.Add($imgPathResolvedForGui)
             $baseIdx = $navList.Count - 1
-            if ($true -eq $script:FlickFitDebugStep5Entry) {
+            if ($true -eq $script:FlickFitDebugGuiMarginNav) {
                 Write-FlickFitHost "[GuiMarginNav] ImagePath が AllImagePaths に含まれないため nav 末尾に追加しました: $(Split-Path $imgPathResolvedForGui -Leaf)" -ForegroundColor DarkYellow
             }
         }
@@ -4687,17 +4692,19 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
         $navCurDbg = if ($navList.Count -gt 0 -and $script:guiMarginCurrentIdx -ge 0 -and $script:guiMarginCurrentIdx -lt $navList.Count) {
             try { (Resolve-Path -LiteralPath $navList[$script:guiMarginCurrentIdx] -ErrorAction Stop).Path } catch { $navList[$script:guiMarginCurrentIdx] }
         } else { '' }
-        Write-FlickFitHost "[DeleteDbg] currentImagePath=$imgPathResolvedForGui" -ForegroundColor DarkGray
-        Write-FlickFitHost "[DeleteDbg] guiImagePath=$(try { [string]$script:guiMarginSessionImagePath } catch { '' })" -ForegroundColor DarkGray
-        Write-FlickFitHost "[DeleteDbg] loadedPath=$loadedDbg" -ForegroundColor DarkGray
-        Write-FlickFitHost "[DeleteDbg] deleteTargetPath=$targetDel" -ForegroundColor DarkGray
-        Write-FlickFitHost "[DeleteDbg] firstImage=$firstNavDbg" -ForegroundColor DarkGray
-        Write-FlickFitHost "[DeleteDbg] navCurrent=$navCurDbg idx=$($script:guiMarginCurrentIdx) navCount=$($navList.Count) coverPath=(n/a) OkApplies=$OkAppliesToCurrentView" -ForegroundColor DarkGray
+        if ($true -eq $script:FlickFitDebugStep5Delete) {
+            Write-FlickFitHost "[DeleteDbg] currentImagePath=$imgPathResolvedForGui" -ForegroundColor DarkGray
+            Write-FlickFitHost "[DeleteDbg] guiImagePath=$(try { [string]$script:guiMarginSessionImagePath } catch { '' })" -ForegroundColor DarkGray
+            Write-FlickFitHost "[DeleteDbg] loadedPath=$loadedDbg" -ForegroundColor DarkGray
+            Write-FlickFitHost "[DeleteDbg] deleteTargetPath=$targetDel" -ForegroundColor DarkGray
+            Write-FlickFitHost "[DeleteDbg] firstImage=$firstNavDbg" -ForegroundColor DarkGray
+            Write-FlickFitHost "[DeleteDbg] navCurrent=$navCurDbg idx=$($script:guiMarginCurrentIdx) navCount=$($navList.Count) coverPath=(n/a) OkApplies=$OkAppliesToCurrentView" -ForegroundColor DarkGray
+        }
 
         if ($OkAppliesToCurrentView -and -not ($CoverConfirmMode -and $script:guiViewingOriginal)) {
             if ([string]::IsNullOrWhiteSpace($loadedDbg)) {
                 [void][System.Windows.Forms.MessageBox]::Show(
-                    "削除対象の画像パスを特定できませんでした（内部状態不整合）。安全のため削除しません。`r`n[DeleteDbg] の loadedPath を確認してください。",
+                    ("削除対象の画像パスを特定できませんでした（内部状態不整合）。安全のため削除しません。`r`n調査時は Core 先頭付近で {0} を有効にしてください。" -f '$script:FlickFitDebugStep5Delete = $true'),
                     "画像の削除",
                     [System.Windows.Forms.MessageBoxButtons]::OK,
                     [System.Windows.Forms.MessageBoxIcon]::Warning)
@@ -4733,7 +4740,9 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
         $confirm = [System.Windows.Forms.MessageBox]::Show($msgDel, $capDel, $mbYesNo, $mbWarn, $mbDef2)
         if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
         $exBeforeDel = Test-Path -LiteralPath $targetDel
-        Write-FlickFitHost "[DeleteDbg] beforeDelete exists=$exBeforeDel path=$targetDel" -ForegroundColor DarkGray
+        if ($true -eq $script:FlickFitDebugStep5Delete) {
+            Write-FlickFitHost "[DeleteDbg] beforeDelete exists=$exBeforeDel path=$targetDel" -ForegroundColor DarkGray
+        }
         try { . $clearRotPreview } catch {}
         try {
             if ($null -ne $pb.Image) { $pb.Image.Dispose(); $pb.Image = $null }
@@ -4762,7 +4771,9 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
             return
         }
         $exAfterDel = Test-Path -LiteralPath $targetDel
-        Write-FlickFitHost "[DeleteDbg] afterDelete exists=$exAfterDel path=$targetDel" -ForegroundColor DarkGray
+        if ($true -eq $script:FlickFitDebugStep5Delete) {
+            Write-FlickFitHost "[DeleteDbg] afterDelete exists=$exAfterDel path=$targetDel" -ForegroundColor DarkGray
+        }
         Write-FlickFitHost "         🗑 GUIから削除: $leaf" -ForegroundColor Yellow
         [void]$deletedInSession.Add($targetDel)
         $targetNorm = try { (Resolve-Path -LiteralPath $targetDel -ErrorAction Stop).Path } catch { $targetDel }
@@ -7760,7 +7771,7 @@ try {
     # finally ブロックで参照するため、早期 exit 経路の前に必ず初期化
     $script:ProcessingCompletedSuccessfully = $false
     Write-FlickFitHost "`n=================================================" -ForegroundColor Cyan
-    Write-FlickFitHost "  FlickFit v1.0.0 - 画像をフリックに最適化する自動処理エンジン" -ForegroundColor Cyan
+    Write-FlickFitHost "  FlickFit v1.0.1 - 画像をフリックに最適化する自動処理エンジン" -ForegroundColor Cyan
     Write-FlickFitHost "=================================================" -ForegroundColor Cyan
     if ($DryRun) { Write-FlickFitHost "  ★ DRY RUN モード" -ForegroundColor Yellow }
     if ($ProfileTiming) { Write-FlickFitHost "  ★ ボトルネック計測モード（処理後に内訳を表示）" -ForegroundColor DarkCyan }
@@ -18430,8 +18441,12 @@ if __name__ == "__main__":
                                                 }
                                             }
                                             if ($guiDeletedThisEntry) {
-                                                Write-FlickFitHost "         [DeleteDbg] GUI 削除済みエントリのため Python エラーを無視し retry / 復元しません ($imgName)" -ForegroundColor DarkCyan
-                                                Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=$(Test-Path -LiteralPath $entryPathStep5) entry=$entryPathStep5 skip=gui_deleted_entry") -ForegroundColor DarkYellow
+                                                if ($true -eq $script:FlickFitDebugStep5Delete) {
+                                                    Write-FlickFitHost "         [DeleteDbg] GUI 削除済みエントリのため Python エラーを無視し retry / 復元しません ($imgName)" -ForegroundColor DarkCyan
+                                                }
+                                                if ($true -eq $script:FlickFitDebugStep5Retry) {
+                                                    Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=$(Test-Path -LiteralPath $entryPathStep5) entry=$entryPathStep5 skip=gui_deleted_entry") -ForegroundColor DarkYellow
+                                                }
                                                 Ensure-FlickFitStep5ErrorRetryCount
                                                 $kSkipGui = Get-FlickFitStep5ErrorRetryKey -Path $entryPathStep5
                                                 if (-not [string]::IsNullOrWhiteSpace($kSkipGui) -and $script:Step5ErrorRetryCount.ContainsKey($kSkipGui)) { [void]$script:Step5ErrorRetryCount.Remove($kSkipGui) }
@@ -18445,7 +18460,9 @@ if __name__ == "__main__":
                                             }
                                             if (-not (Test-Path -LiteralPath $entryPathStep5)) {
                                                 Write-FlickFitHost "         ↩ GUI 削除などで元画像が無いため retry / trim_only を行いません ($entryNameStep5)" -ForegroundColor DarkGray
-                                                Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=False entry=$entryPathStep5 skip=missing_entry_inner") -ForegroundColor DarkYellow
+                                                if ($true -eq $script:FlickFitDebugStep5Retry) {
+                                                    Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=False entry=$entryPathStep5 skip=missing_entry_inner") -ForegroundColor DarkYellow
+                                                }
                                                 Ensure-FlickFitStep5ErrorRetryCount
                                                 $kMissIn = Get-FlickFitStep5ErrorRetryKey -Path $entryPathStep5
                                                 if (-not [string]::IsNullOrWhiteSpace($kMissIn) -and $script:Step5ErrorRetryCount.ContainsKey($kMissIn)) { [void]$script:Step5ErrorRetryCount.Remove($kMissIn) }
@@ -18457,7 +18474,9 @@ if __name__ == "__main__":
                                                 $output = @('BAL_DELETE_CONTINUE')
                                                 break
                                             }
-                                            Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=$(Test-Path -LiteralPath $entryPathStep5) entry=$entryPathStep5") -ForegroundColor DarkYellow
+                                            if ($true -eq $script:FlickFitDebugStep5Retry) {
+                                                Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=$(Test-Path -LiteralPath $entryPathStep5) entry=$entryPathStep5") -ForegroundColor DarkYellow
+                                            }
                                             $actInner = Get-FlickFitStep5RetryAction -Path $entryPathStep5 -MaxRetryBeforeFallback 2
                                             # 1〜2 回目: 再GUI。3 回目: 無限ループ防止の trim_only
                                             if ($actInner -eq 'fallback') {
@@ -18485,7 +18504,9 @@ if __name__ == "__main__":
                                                 break
                                             }
                                             Write-FlickFitHost "         ⚠ GUI後の適用に失敗しました。元画像を復元し、ノド/余白を再設定してください" -ForegroundColor Yellow
-                                            Write-FlickFitHost ("[STEP5RetryGui] entryPathStep5={0} imgName={1} origPath={2} (次ループで GUI ImagePath は entry に同期)" -f $entryPathStep5, $imgName, $origPath) -ForegroundColor DarkYellow
+                                            if ($true -eq $script:FlickFitDebugStep5Retry) {
+                                                Write-FlickFitHost ("[STEP5RetryGui] entryPathStep5={0} imgName={1} origPath={2} (次ループで GUI ImagePath は entry に同期)" -f $entryPathStep5, $imgName, $origPath) -ForegroundColor DarkYellow
+                                            }
                                             if (Test-Path -LiteralPath $tempBackupB) {
                                                 Copy-Item -LiteralPath $tempBackupB -Destination $entryPathStep5 -Force -ErrorAction SilentlyContinue
                                             }

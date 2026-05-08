@@ -1,5 +1,5 @@
 ﻿#Requires -Version 5.1
-# FlickFit Launcher v1.0.0 — 最小ランチャー（WinForms）。メインは別コンソールの PowerShell で起動する。
+# FlickFit Launcher v1.0.1 — 最小ランチャー（WinForms）。メインは別コンソールの PowerShell で起動する。
 #
 # 【メイン終了後にランチャーも落ちる問題の要点】旧来の「親から子 pwsh を直接 Process.Start」では子終了で親ランチャーが巻き込まれることがあった。
 # 対策: 非表示 cmd を watcher とし、一時 .cmd 内で start "" /wait pwsh …（.cmd は UTF-8 BOM + 先頭 chcp 65001、日本語パス・引用符）。
@@ -1005,7 +1005,7 @@ function Show-FlickFitAutoJudgeSettingsDialog {
 }
 
 $form = [System.Windows.Forms.Form]::new()
-$form.Text = 'FlickFit v1.0.0'
+$form.Text = 'FlickFit v1.0.1'
 # Size ではなく ClientSize（描画領域）を指定。高さ不足だと下部のヒントが見切れる
 $form.ClientSize = [System.Drawing.Size]::new(700, 732)
 $form.MinimumSize = [System.Drawing.Size]::new(620, 622)
