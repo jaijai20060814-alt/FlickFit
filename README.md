@@ -1,4 +1,5 @@
 # FlickFit
+![FlickFitの処理例](docs/images/flickfit-before-after.png)
 
 **バージョン 1.0.1**（2026-05-07・修正版）  
 変更履歴は [CHANGELOG.md](CHANGELOG.md) を参照してください。
