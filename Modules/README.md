@@ -1,6 +1,6 @@
 # 漫画整理ツール モジュール
 
-（FlickFit **v1.0.0** 同梱）
+（FlickFit **v1.0.1** 同梱）
 
 **単一の正（source of truth）**: 入出力・パース・巻/話判定はここを編集する。`FlickFit-Core.ps1` では同名関数を定義しない（Load-Modules 後に上書きしない）。
 
