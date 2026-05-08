@@ -115,33 +115,6 @@ pip install pillow opencv-python numpy
 
 これらは**内蔵の汎用に追加マージ**され、
 **JSON を作らない既定でも** `cover/表紙/カバー` 等で動作します。
-
-👉 配布系・配布元固有の **フォルダ名**・プレフィックス等は、本体ではなくここに分離する想定です
-
----
-
-### 配布 ZIP に含めないもの（衛生）
-
-次はローカル環境や実行履歴が混ざりやすいため、**公開配布物からは除く**ことを推奨します。
-
-- `*.pyc` / `__pycache__`
-- `.jxl-plugin-cache.json`（Python 実体パス等が入ることがあります）
-- `launcher_trace.log`
-- `VolumePatternRules.local.txt`（個人用ルール）
-
-プロジェクト直下の `.gitignore` にも同様のパターンを入れています。
-
-**既に Git で追跡しているファイル**は ignore だけでは索引から消えません。リポジトリから外す例（パスは環境に合わせて調整）:
-
-```powershell
-git rm --cached .jxl-plugin-cache.json
-git rm --cached Modules/.jxl-plugin-cache.json
-git rm --cached launcher_trace.log
-git rm --cached VolumePatternRules.local.txt
-```
-
-`*.pyc` や `__pycache__` は、該当ファイルを `git ls-files` で確認してから個別に `git rm --cached` するのが確実です（ワイルドカードはシェルによって解釈が異なります）。
-
 ---
 
 ## よくある状況
