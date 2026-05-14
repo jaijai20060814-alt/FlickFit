@@ -1,5 +1,5 @@
 # FlickFit
-
+![FlickFit before/after](docs/images/flickfit-before-after.png)
 **バージョン 1.0.2**（2026-05-13）  
 変更履歴は [CHANGELOG.md](CHANGELOG.md) を参照してください。  
 実行時のコンソール・ランチャーの版表示は、展開フォルダ直下の **`VERSION`** を読みます（配布パッケージでは通常 `1.0.2` と一致）。
