@@ -1,6 +1,6 @@
 # 漫画整理ツール モジュール
 
-（FlickFit **v1.0.1** 同梱）
+（FlickFit **v1.0.2** 同梱）
 
 **単一の正（source of truth）**: 入出力・パース・巻/話判定はここを編集する。`FlickFit-Core.ps1` では同名関数を定義しない（Load-Modules 後に上書きしない）。
 
@@ -8,6 +8,7 @@
 
 | モジュール | 内容 |
 |-----------|------|
+| FlickFitVersion.ps1 | パッケージ版番号（`VERSION` ファイル）の読み取り（`Get-FlickFitVersion`）。Core / Launcher が起動時に使用 |
 | Config.ps1 | 拡張子、WinRAR/Python/BPG パス等の定数、`$script:FolderAutoTimer` 初期化 |
 | Utils.ps1 | 入出力（`Write-FlickFitHost` / `Write-FlickFitWarning` / `Write-Step` / `Read-HostWithEsc`）、文字列変換、パース（Confirm-YN, Sanitize-FileName, Parse-RangeInput 等） |
 | VolumeContext.ps1 | 巻数・話数判定（Get-VolContext, Get-VolFromParentName, Get-ChapterNumber, Get-RealRoot, Get-LeafFolders） |

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    FlickFit v1.0.1 - 画像をフリックに最適化する自動処理エンジン
+    FlickFit - 画像をフリックに最適化する自動処理エンジン（実行時バージョンはルートの VERSION → $script:FlickFitVersion）
     作品名フォルダを指定して自動実行: 解凍→巻数/重複判定→作品名取得→フォルダ整理→表紙トリミング→見開き分割→RAR圧縮→作業フォルダ削除
     ※ 複数作品は別々のスクリプトインスタンスで並列実行可能
     [CRITICAL FIX] STEP7 元ファイル削除: selectedExistingFolders（既存作業フォルダ）をアーカイブ廃棄対象に混在させてフォルダごと削除していた不具合を排除。解凍元は ArchiveExtensions かつファイルのみ。
@@ -9,7 +9,8 @@
     [UX] STEP7: クリーンアップは UserConfig に CleanupWorkingFolders・KeepSourceArchives 両方があるとき確認省略（それ以外は STEP7-1 / STEP7-2 の2段子確認）。配布既定: 作業は削除寄り・元アーカイブは保持寄り
 
 .NOTES
-    パッケージ版 v1.0.1（2026-05-07）。要約は CHANGELOG.md / README.md。
+    パッケージの版番号の正本はリポジトリ直下の VERSION。実行時は Get-FlickFitVersion / $script:FlickFitVersion。
+    リリース要約は CHANGELOG.md / README.md。
 
     開発履歴（参考・抜粋） ― v1.3.0 - モジュール細分化:
             [REFACTOR] Read-HostWithEsc・Parse-RangeInput・巻/話ヘルパーは Modules\Utils.ps1 / VolumeContext.ps1 に一本化（メインの重複定義を削除）
@@ -86,7 +87,7 @@
     v10.1+ - UserConfig.json に AutoJudge（Preset: standard/lenient/custom 等）を任意指定可能。FlickFitLauncher「詳細オプション…」で GUI から保存可（手編集JSON不要の前提用）
     v10.1+ - STEP5 デバッグ: $script:FlickFitDebugStep5Entry = $true で [STEP5EntryDbg] ＋ BAL 見開き Python 直前 [STEP5GuiApply]（lock/branch/LTRB）。別画像OK時の [注意] 行は Split-Path 混線回避（Get-LiteralPathLeaf）
     v10.1+ - STEP5 ログ詳細: $script:FlickFitDebugStep5Verbose = $true で [DEBUG] 表紙幅 / [AutoGutter] / [PixelLoss] / [SplitWidthVal] / 分割幅の黄色警告 等。通常時は [参考表示]… の1行＋短い要約
-    v1.0.1+ - STEP5 GUI 削除・リトライ調査ログ（既定 OFF）: $script:FlickFitDebugStep5Delete（[DeleteDbg]）/ $script:FlickFitDebugStep5Retry（[STEP5RetryDbg][STEP5RetryGui]）/ $script:FlickFitDebugGuiMarginNav（[GuiMarginNav]）
+    v10.1+ - STEP5 ノド/余白 GUI 削除デバッグ: $script:FlickFitDebugStep5Delete = $true のときのみ `[DeleteDbg]` 系コンソール行を出力（通常実行では非表示。🗑 GUIから削除 等の通常ログは従来どおり）
     v10.1+ - STEP1 構造解析サマリ: 巻内で 特別編/おまけ/番外 等のキーワードを巻の末尾（話数の後）にソート（無効: $FlickFitDisableOmakeEndOfVolSort）
     v10.1+ - STEP1 構造解析サマリ一行表示: 長い作品名を削り 第N巻+リーフ中心、幅超過時はリーフを中略（末尾近くを優先）
     v10.1+ - STEP1 構造解析サマリ: 行番号<>行番号 で同分類内の前後順のみ入替（巻・話 Ctx 不変）／終了時 Leaf の処理順を一覧と揃える
@@ -155,6 +156,17 @@ Write-Host ""
 # モジュールロード（Config, Utils, VolumeContext, UserConfig）
 # ===========================================================================
 $scriptRoot = Split-Path $MyInvocation.MyCommand.Path -Parent
+$ffVerPs1 = Join-Path $scriptRoot 'Modules\FlickFitVersion.ps1'
+if (Test-Path -LiteralPath $ffVerPs1) { try { . $ffVerPs1 } catch { } }
+$script:FlickFitVersion = 'dev'
+if (Get-Command Get-FlickFitVersion -ErrorAction SilentlyContinue) {
+    try {
+        $tv = Get-FlickFitVersion -PackageRoot $scriptRoot
+        if (-not [string]::IsNullOrWhiteSpace($tv)) { $script:FlickFitVersion = $tv }
+    } catch { }
+}
+if ([string]::IsNullOrWhiteSpace($script:FlickFitVersion)) { $script:FlickFitVersion = 'dev' }
+
 $loadModulesPath = Join-Path $scriptRoot "Modules\Load-Modules.ps1"
 $script:UserConfig = $null
 if (Test-Path -LiteralPath $loadModulesPath) {
@@ -1022,13 +1034,9 @@ if (-not (Get-Variable -Name FlickFitDebugPythonGeometry -Scope Script -ErrorAct
 if (-not (Get-Variable -Name FlickFitDebugStep5Entry -Scope Script -ErrorAction SilentlyContinue)) { $script:FlickFitDebugStep5Entry = $false }
 # STEP5: 表紙幅[DEBUG] / [AutoGutter] / [PixelLoss] / [SplitWidthVal] / 分割幅の警告行 / キャッシュ行 / ノド→Python 詳細 等（既定: 出さない。$script:FlickFitDebugStep5Verbose = $true）
 if (-not (Get-Variable -Name FlickFitDebugStep5Verbose -Scope Script -ErrorAction SilentlyContinue)) { $script:FlickFitDebugStep5Verbose = $false }
-if (-not (Get-Variable -Name FlickFitDebugSourceArchiveDelete -Scope Script -ErrorAction SilentlyContinue)) { $script:FlickFitDebugSourceArchiveDelete = $false }
-# STEP5: GUI 削除パス・削除前後 exists 等（[DeleteDbg]。既定 OFF）
+# STEP5: ノド/余白 GUI「この画像を削除」周辺の [DeleteDbg]（既定: 出さない。$script:FlickFitDebugStep5Delete = $true）
 if (-not (Get-Variable -Name FlickFitDebugStep5Delete -Scope Script -ErrorAction SilentlyContinue)) { $script:FlickFitDebugStep5Delete = $false }
-# STEP5: エラー retry / fallback カウント詳細（[STEP5RetryDbg] / [STEP5RetryGui]。既定 OFF）
-if (-not (Get-Variable -Name FlickFitDebugStep5Retry -Scope Script -ErrorAction SilentlyContinue)) { $script:FlickFitDebugStep5Retry = $false }
-# ノド・余白 GUI: nav へ ImagePath を追補したとき（[GuiMarginNav]。既定 OFF）
-if (-not (Get-Variable -Name FlickFitDebugGuiMarginNav -Scope Script -ErrorAction SilentlyContinue)) { $script:FlickFitDebugGuiMarginNav = $false }
+if (-not (Get-Variable -Name FlickFitDebugSourceArchiveDelete -Scope Script -ErrorAction SilentlyContinue)) { $script:FlickFitDebugSourceArchiveDelete = $false }
 if (-not (Get-Variable -Name SourceArchivePathsForStep7Delete -Scope Script -ErrorAction SilentlyContinue)) { $script:SourceArchivePathsForStep7Delete = @() }
 
 function Write-FlickFitDebugStep5VerboseHost {
@@ -2647,7 +2655,7 @@ function Test-FlickFitStep5StringLooksLikeResultError {
     return $false
 }
 # 1〜2 回目 retry、3 回目 fallback（MaxRetryBeforeFallback=2 → n=3 のとき n -gt 2）
-# 詳細ログ: $script:FlickFitDebugStep5Retry = $true
+# 抑止: $script:FlickFitDebugStep5Retry = $false
 function Get-FlickFitStep5RetryAction {
     param(
         [string]$Path,
@@ -2660,14 +2668,16 @@ function Get-FlickFitStep5RetryAction {
     }
     if ([string]::IsNullOrWhiteSpace($key)) {
         $key = 'STEP5_RETRY_KEY_EMPTY'
-        if (($true -eq $script:FlickFitDebugStep5Retry) -and -not ($true -eq $script:FlickFitObsDisable)) { Write-FlickFitWarning "[STEP5RetryDbg] キー空のため仮キーで加算（Path 不整合の可能性）" }
+        if (-not ($true -eq $script:FlickFitObsDisable)) { Write-FlickFitWarning "[STEP5RetryDbg] キー空のため仮キーで加算（Path 不整合の可能性）" }
     }
     $n = 0
     if ($script:Step5ErrorRetryCount.ContainsKey($key)) { try { $n = [int]$script:Step5ErrorRetryCount[$key] } catch { $n = 0 } }
     $n++
     $script:Step5ErrorRetryCount[$key] = $n
     $act = if ($n -gt $MaxRetryBeforeFallback) { 'fallback' } else { 'retry' }
-    if ($true -eq $script:FlickFitDebugStep5Retry) {
+    $showStep5RetryDbg = $true
+    if (Get-Variable -Name FlickFitDebugStep5Retry -Scope Script -ErrorAction SilentlyContinue) { if ($false -eq $script:FlickFitDebugStep5Retry) { $showStep5RetryDbg = $false } }
+    if ($showStep5RetryDbg) {
         Write-FlickFitHost ("[STEP5RetryDbg] key={0}" -f $key) -ForegroundColor DarkYellow
         Write-FlickFitHost ("[STEP5RetryDbg] count={0}" -f $n) -ForegroundColor DarkYellow
         Write-FlickFitHost ("[STEP5RetryDbg] action={0}" -f $act) -ForegroundColor DarkYellow
@@ -2775,7 +2785,7 @@ function Show-GutterMarginSetGui {
         if (-not $anchorFoundInNav -and $imgPathResolvedForGui -and (Test-Path -LiteralPath $imgPathResolvedForGui)) {
             [void]$navList.Add($imgPathResolvedForGui)
             $baseIdx = $navList.Count - 1
-            if ($true -eq $script:FlickFitDebugGuiMarginNav) {
+            if ($true -eq $script:FlickFitDebugStep5Entry) {
                 Write-FlickFitHost "[GuiMarginNav] ImagePath が AllImagePaths に含まれないため nav 末尾に追加しました: $(Split-Path $imgPathResolvedForGui -Leaf)" -ForegroundColor DarkYellow
             }
         }
@@ -2842,6 +2852,8 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
     $script:guiMarginImgH = $imgH
     $script:guiMarginCurrentIdx = $baseIdx
     $script:guiMarginZoom = 1.0
+    # Ctrl+ホイール拡大の上限（操作倍率。実効表示は「ウィンドウに収まる fits比」× 本値）
+    $gmCtrlWheelZoomMax = 12.0
     $imgMs = $null
     try {
         $imgMs = New-Object System.IO.MemoryStream(,([System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $imgPathResolvedForGui).Path)))
@@ -3130,7 +3142,7 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
         $fit = [Math]::Min($vw / $iw, $vh / $ih)
         $z = [double]$script:guiMarginZoom
         if ($z -lt 0.2) { $z = 0.2; $script:guiMarginZoom = $z }
-        if ($z -gt 8.0) { $z = 8.0; $script:guiMarginZoom = $z }
+        if ($z -gt $gmCtrlWheelZoomMax) { $z = $gmCtrlWheelZoomMax; $script:guiMarginZoom = $z }
         $sc = $fit * $z
         $nw = [Math]::Max(4, [int][Math]::Ceiling($iw * $sc))
         $nh = [Math]::Max(4, [int][Math]::Ceiling($ih * $sc))
@@ -3202,7 +3214,7 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
         if ([System.Windows.Forms.Control]::ModifierKeys -band [System.Windows.Forms.Keys]::Control) {
             if ($e.Delta -gt 0) { $script:guiMarginZoom *= 1.12 } else { $script:guiMarginZoom /= 1.12 }
             if ($script:guiMarginZoom -lt 0.2) { $script:guiMarginZoom = 0.2 }
-            if ($script:guiMarginZoom -gt 8.0) { $script:guiMarginZoom = 8.0 }
+            if ($script:guiMarginZoom -gt $gmCtrlWheelZoomMax) { $script:guiMarginZoom = $gmCtrlWheelZoomMax }
             & $applyGmZoomLayout
             return
         }
@@ -4704,7 +4716,7 @@ public class GmMarginRotOrangeOverlayPanelV2 : Panel {
         if ($OkAppliesToCurrentView -and -not ($CoverConfirmMode -and $script:guiViewingOriginal)) {
             if ([string]::IsNullOrWhiteSpace($loadedDbg)) {
                 [void][System.Windows.Forms.MessageBox]::Show(
-                    ("削除対象の画像パスを特定できませんでした（内部状態不整合）。安全のため削除しません。`r`n調査時は Core 先頭付近で {0} を有効にしてください。" -f '$script:FlickFitDebugStep5Delete = $true'),
+                    ("削除対象の画像パスを特定できませんでした（内部状態不整合）。安全のため削除しません。" + "`r`n詳細ログが必要な場合は、PowerShell で " + '$script:FlickFitDebugStep5Delete = $true を設定してから再試行してください。'),
                     "画像の削除",
                     [System.Windows.Forms.MessageBoxButtons]::OK,
                     [System.Windows.Forms.MessageBoxIcon]::Warning)
@@ -5328,6 +5340,106 @@ function Get-FlickFitCoverLoopIndexForPath {
         } catch { }
     }
     return -1
+}
+
+# 2ページ目見開き GUI → Python 後の再開インデックス。リゾルバ成功時と同じ値を返す。フォールバックは一覧上の実処理パス（ProcessedSourcePath）基準。
+function Resolve-FlickFitCoverCheckIdxAfterSpreadGuiOp {
+    param(
+        [array]$Images,
+        [string]$ProcessedSourcePath,
+        [string]$PythonResult,
+        [int]$ResumeDeltaFromSourceRow
+    )
+    $primary = Get-FlickFitNextCoverLoopIndexAfterSpreadOp -Images $Images -ProcessedSourcePath $ProcessedSourcePath -PythonResult $PythonResult
+    if ($null -ne $primary) { return $primary }
+
+    $arr = @($Images)
+    $cnt = $arr.Count
+    if ($cnt -le 0 -or [string]::IsNullOrWhiteSpace($ProcessedSourcePath)) { return $null }
+
+    try {
+        $leafSrc = [System.IO.Path]::GetFileName($ProcessedSourcePath)
+        $stemSrc = [System.IO.Path]::GetFileNameWithoutExtension($ProcessedSourcePath)
+        $extSrc = [System.IO.Path]::GetExtension($ProcessedSourcePath)
+    } catch { return $null }
+
+    $idxPk = Get-FlickFitCoverLoopIndexForPath -Images $Images -FullPath $ProcessedSourcePath
+
+    $idxLeaf = -1
+    for ($j = 0; $j -lt $cnt; $j++) {
+        if ([string]::Equals($arr[$j].Name, $leafSrc, [System.StringComparison]::OrdinalIgnoreCase)) { $idxLeaf = $j; break }
+    }
+
+    $pyText = if ($null -eq $PythonResult) { '' } else { "$PythonResult" }
+
+    # SPLIT:2 で _2 検出に失敗したが、ソース行がまだ一覧にある異常時など（削除前 nextIdx 固定加算よりマシ）
+    if ($pyText -match 'SPLIT:2') {
+        if ($idxPk -ge 0) { return [Math]::Min($idxPk + $ResumeDeltaFromSourceRow, $cnt) }
+        if ($idxLeaf -ge 0) { return [Math]::Min($idxLeaf + $ResumeDeltaFromSourceRow, $cnt) }
+        return $null
+    }
+
+    if ($pyText -match 'SPLIT:1') {
+        $want1 = ($stemSrc + '_1' + $extSrc)
+        for ($j = 0; $j -lt $cnt; $j++) {
+            if ([string]::Equals($arr[$j].Name, $want1, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return [Math]::Min($j + 1, $cnt)
+            }
+        }
+        if ($idxLeaf -ge 0) { return [Math]::Min($idxLeaf + 1, $cnt) }
+        if ($idxPk -ge 0) { return [Math]::Min($idxPk + 1, $cnt) }
+        return $null
+    }
+
+    if ($pyText -match 'TRIMMED:1') {
+        if ($idxLeaf -ge 0) { return [Math]::Min($idxLeaf + 1, $cnt) }
+        if ($idxPk -ge 0) { return [Math]::Min($idxPk + 1, $cnt) }
+        return $null
+    }
+
+    # 結果トークンが想定外でも、一覧にソース行があれば ResumeDelta で進める
+    $adv = [Math]::Max(1, $ResumeDeltaFromSourceRow)
+    if ($idxPk -ge 0) { return [Math]::Min($idxPk + $adv, $cnt) }
+    if ($idxLeaf -ge 0) { return [Math]::Min($idxLeaf + $adv, $cnt) }
+    return $null
+}
+
+# 再開インデックスが決められないとき: 実処理パス・GUI開始パスを一覧で探し、その行から再評価。見つからないときだけ nextIdx（stale の可能性あり）。
+function Get-FlickFitCoverSpreadUltimateResumeImgIdx {
+    param(
+        [array]$Images,
+        [string]$ProcessedSourcePath,
+        [string]$SpreadGuiEntryPath,
+        [int]$StaleNextIdx
+    )
+    $arr = @($Images)
+    $cnt = $arr.Count
+    if ($cnt -le 0) {
+        Write-FlickFitWarning "[STEP5] 画像一覧が空のため、再開インデックスを 0 とします。"
+        return 0
+    }
+    foreach ($cand in @($ProcessedSourcePath, $SpreadGuiEntryPath)) {
+        if ([string]::IsNullOrWhiteSpace($cand)) { continue }
+        $ix = Get-FlickFitCoverLoopIndexForPath -Images $arr -FullPath $cand
+        if ($ix -ge 0) {
+            return ([Math]::Min($cnt - 1, [Math]::Max(0, $ix)))
+        }
+        try {
+            $leaf = [System.IO.Path]::GetFileName($cand)
+        } catch { continue }
+        if (-not [string]::IsNullOrWhiteSpace($leaf)) {
+            for ($j = 0; $j -lt $cnt; $j++) {
+                if ([string]::Equals($arr[$j].Name, $leaf, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return ([Math]::Min($cnt - 1, [Math]::Max(0, $j)))
+                }
+            }
+        }
+    }
+    $ixStale = [int]$StaleNextIdx
+    if ($ixStale -lt 0) { $ixStale = 0 }
+    if ($ixStale -ge $cnt) { $ixStale = $cnt - 1 }
+    Write-FlickFitWarning "[STEP5] 再開位置を一覧から特定できませんでした。インデックス nextIdx=$ixStale で再開します（削除・分割直後はずれることがあります。必要なら該当ページを再確認してください）。"
+    return $ixStale
 }
 
 # Restart Manager API を使ってファイルをロックしているプロセスを取得する
@@ -7771,7 +7883,7 @@ try {
     # finally ブロックで参照するため、早期 exit 経路の前に必ず初期化
     $script:ProcessingCompletedSuccessfully = $false
     Write-FlickFitHost "`n=================================================" -ForegroundColor Cyan
-    Write-FlickFitHost "  FlickFit v1.0.1 - 画像をフリックに最適化する自動処理エンジン" -ForegroundColor Cyan
+    Write-FlickFitHost ("  FlickFit v{0} - 画像をフリックに最適化する自動処理エンジン" -f $script:FlickFitVersion) -ForegroundColor Cyan
     Write-FlickFitHost "=================================================" -ForegroundColor Cyan
     if ($DryRun) { Write-FlickFitHost "  ★ DRY RUN モード" -ForegroundColor Yellow }
     if ($ProfileTiming) { Write-FlickFitHost "  ★ ボトルネック計測モード（処理後に内訳を表示）" -ForegroundColor DarkCyan }
@@ -16433,28 +16545,54 @@ if __name__ == "__main__":
                                     }
                                 }
                                 $hadGui2SessionDeletes = ($gui2DeletedPaths.Count -gt 0)
-                                if (Test-FlickFitGutterGuiDeleteRequested -Tbl $guiResult2) {
-                                    Write-FlickFitHost "         ↩ GUI削除を反映しました。一覧を更新し、次の画像から再評価します" -ForegroundColor DarkGray
-                                    $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
-                                    $coverLoopImgsRefreshed = $true
-                                    $ixR = $nextIdx
-                                    if ($ixR -lt 0) { $ixR = 0 }
-                                    if ($imgs.Count -gt 0 -and $ixR -ge $imgs.Count) { $ixR = $imgs.Count - 1 }
-                                    $coverWhileExitImgIdxOverride = $ixR
-                                    break
+                                # セッション内に削除があっても、OK 確定時の適用先が削除済み以外の現存ファイルならノド/分割をそのまま適用（002 削除→003 で OK 等）
+                                $gui2ApplyDespiteDeletes = $false
+                                if ($hadGui2SessionDeletes -and $null -ne $guiResult2 -and $guiResult2 -is [System.Collections.IDictionary]) {
+                                    $gxAd2 = Get-HashtableInt -Tbl $guiResult2 -Key 'GutterX' -Default (-1)
+                                    $apAd2 = Get-HashtableTrimmedString -Tbl $guiResult2 -Key 'ApplyImagePath'
+                                    $dtAd2 = Get-HashtableTrimmedString -Tbl $guiResult2 -Key 'DeleteTargetPath'
+                                    if ($gxAd2 -ge 0 -and -not [string]::IsNullOrWhiteSpace($apAd2) -and (Test-Path -LiteralPath $apAd2)) {
+                                        $apNormAd2 = $null
+                                        try { $apNormAd2 = [System.IO.Path]::GetFullPath($apAd2).TrimEnd('\') } catch { $apNormAd2 = $apAd2.TrimEnd('\') }
+                                        $apInDel2 = $false
+                                        foreach ($gdp2 in $gui2DeletedPaths) {
+                                            $gnAd2 = $null
+                                            try { $gnAd2 = [System.IO.Path]::GetFullPath([string]$gdp2).TrimEnd('\') } catch { $gnAd2 = ([string]$gdp2).TrimEnd('\') }
+                                            if ($gnAd2 -and $apNormAd2 -and [string]::Equals($gnAd2, $apNormAd2, [StringComparison]::OrdinalIgnoreCase)) { $apInDel2 = $true; break }
+                                        }
+                                        $dtNormAd2 = $null
+                                        if (-not [string]::IsNullOrWhiteSpace($dtAd2)) {
+                                            try { $dtNormAd2 = [System.IO.Path]::GetFullPath($dtAd2).TrimEnd('\') } catch { $dtNormAd2 = $dtAd2.TrimEnd('\') }
+                                        }
+                                        $delTargetDiffersApply2 = ($dtNormAd2 -and $apNormAd2 -and -not [string]::Equals($dtNormAd2, $apNormAd2, [StringComparison]::OrdinalIgnoreCase))
+                                        if (-not $apInDel2 -and $delTargetDiffersApply2) {
+                                            $gui2ApplyDespiteDeletes = $true
+                                        }
+                                    }
                                 }
-                                if ($hadGui2SessionDeletes) {
-                                    Write-FlickFitHost "         ↩ GUIで画像を削除したため、このセッションの余白・分割結果は適用せず、一覧を更新して次の画像から再評価します" -ForegroundColor DarkGray
-                                    $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
-                                    $coverLoopImgsRefreshed = $true
-                                    $ixR = $nextIdx
-                                    if ($ixR -lt 0) { $ixR = 0 }
-                                    if ($imgs.Count -gt 0 -and $ixR -ge $imgs.Count) { $ixR = $imgs.Count - 1 }
-                                    $coverWhileExitImgIdxOverride = $ixR
-                                    break
-                                }
-                                if ($null -ne $guiResult2 -and $guiResult2 -is [System.Collections.IDictionary] -and (Get-HashtableInt -Tbl $guiResult2 -Key 'GutterX' -Default (-1)) -ge 0) {
-                                    $script:PostCoverSpreadGuiDone[$dir] = $true
+                                if ((Test-FlickFitGutterGuiDeleteRequested -Tbl $guiResult2) -or $hadGui2SessionDeletes) {
+                                    if (-not $gui2ApplyDespiteDeletes) {
+                                        if (Test-FlickFitGutterGuiDeleteRequested -Tbl $guiResult2) {
+                                            Write-FlickFitHost "         ↩ GUI削除を反映しました。一覧を更新し、次の画像から再評価します" -ForegroundColor DarkGray
+                                        } else {
+                                            Write-FlickFitHost "         ↩ GUIで画像を削除したため、このセッションの余白・分割結果は適用せず、一覧を更新して次の画像から再評価します" -ForegroundColor DarkGray
+                                        }
+                                        $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
+                                        $coverLoopImgsRefreshed = $true
+                                        $ixR = $nextIdx
+                                        if ($ixR -lt 0) { $ixR = 0 }
+                                        if ($imgs.Count -gt 0 -and $ixR -ge $imgs.Count) { $ixR = $imgs.Count - 1 }
+                                        $coverWhileExitImgIdxOverride = $ixR
+                                        break
+                                    }
+                                    if ($true -eq $script:FlickFitDebugStep5Delete) {
+                                        $apDbg2 = Get-HashtableTrimmedString -Tbl $guiResult2 -Key 'ApplyImagePath'
+                                        try {
+                                            Write-FlickFitHost ("         [DeleteDbg] 2pGUI: 削除ありだが適用続行 Apply={0}" -f $(Split-Path -Leaf $apDbg2)) -ForegroundColor DarkGray
+                                        } catch {
+                                            Write-FlickFitHost "         [DeleteDbg] 2pGUI: 削除ありだが適用続行" -ForegroundColor DarkGray
+                                        }
+                                    }
                                 }
                                 $splitPath2 = $nextImg.FullName
                                 $apSp2 = Get-HashtableTrimmedString -Tbl $guiResult2 -Key 'ApplyImagePath'
@@ -16474,7 +16612,25 @@ if __name__ == "__main__":
                                     $processedImages++
                                     $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
                                     $coverLoopImgsRefreshed = $true
-                                    $coverCheckIdx = $nextIdx + 1
+                                    $photoResumePath = Get-HashtableTrimmedString -Tbl $guiResult2 -Key 'ApplyImagePath'
+                                    if ([string]::IsNullOrWhiteSpace($photoResumePath)) { $photoResumePath = [string]$photoPath }
+                                    if ([string]::IsNullOrWhiteSpace($photoResumePath)) { $photoResumePath = $splitPath2 }
+                                    $idxPhotoResume = Get-FlickFitCoverLoopIndexForPath -Images $imgs -FullPath $photoResumePath
+                                    if ($idxPhotoResume -lt 0 -and -not [string]::IsNullOrWhiteSpace($photoResumePath)) {
+                                        try {
+                                            $leafPh = [System.IO.Path]::GetFileName($photoResumePath)
+                                            $arrPh = @($imgs)
+                                            for ($iph = 0; $iph -lt $arrPh.Count; $iph++) {
+                                                if ([string]::Equals($arrPh[$iph].Name, $leafPh, [System.StringComparison]::OrdinalIgnoreCase)) { $idxPhotoResume = $iph; break }
+                                            }
+                                        } catch { }
+                                    }
+                                    if ($idxPhotoResume -ge 0) {
+                                        $coverCheckIdx = [Math]::Min($idxPhotoResume + 1, $imgs.Count)
+                                    } else {
+                                        Write-FlickFitWarning "[STEP5] PhotosEdit 後の再開インデックスを一覧から確定できませんでした。実処理パス優先で安全側から再評価します。"
+                                        $coverWhileExitImgIdxOverride = Get-FlickFitCoverSpreadUltimateResumeImgIdx -Images $imgs -ProcessedSourcePath $photoResumePath -SpreadGuiEntryPath $spreadGuiEntryPath -StaleNextIdx $nextIdx
+                                    }
                                     break
                                 }
                                 $lt2 = 0; $rt2 = 0; $tt2 = 0; $bt2 = 0
@@ -16530,6 +16686,7 @@ if __name__ == "__main__":
                                         if ($skipCacheC2a) { $script:SplitWidthApplyGutterOnlyThisPage = $false } else {
                                             $script:FolderGutterCache[$dir] = New-FlickFitFolderGutterCacheEntry -GutterX $gutterX -GutterPct 50.0 -LeftTrimPx $lt2 -RightTrimPx $rt2 -TopTrimPx $tt2 -BottomTrimPx $bt2 -ImgW $nextW -ImgH $nextH -RefAspect $refAsp -RefWidth $refW -MarginTrimWithoutSplit $ucsC2
                                         }
+                                        $script:PostCoverSpreadGuiDone[$dir] = $true
                                     } elseif ($result -match "SPLIT:2") {
                                         Write-FlickFitHost "         ✅ のど位置を手動設定して2ページに分割（以降、同サイズ画像は自動適用）" -ForegroundColor DarkGreen
                                         $folderSplit += 2
@@ -16569,6 +16726,7 @@ if __name__ == "__main__":
                                         if (-not $script:FolderMarginMode.ContainsKey($sizeKey)) {
                                             $script:FolderMarginMode[$sizeKey] = 'gui'
                                         }
+                                        $script:PostCoverSpreadGuiDone[$dir] = $true
                                     } else {
                                         Write-FlickFitHost "         ⚠ 分割/トリム処理: $result" -ForegroundColor Yellow
                                     }
@@ -16589,27 +16747,33 @@ if __name__ == "__main__":
                                                 Write-FlickFitHost "         [IDX-DBG] 2pGui entry=$(Split-Path -Leaf $spreadGuiEntryPath) actual=$(Split-Path -Leaf $splitPath2) → coverCheckIdx=$coverCheckIdx (resume entry; altページのみ処理済み)" -ForegroundColor DarkGray
                                             }
                                         } else {
-                                            $resolvedCcGui = Get-FlickFitNextCoverLoopIndexAfterSpreadOp -Images $imgs -ProcessedSourcePath $splitPath2 -PythonResult $result
+                                            $resolvedCcGui = Resolve-FlickFitCoverCheckIdxAfterSpreadGuiOp -Images $imgs -ProcessedSourcePath $splitPath2 -PythonResult $result -ResumeDeltaFromSourceRow $coverResumeAfter2pGui
                                             if ($null -ne $resolvedCcGui) {
                                                 $coverCheckIdx = $resolvedCcGui
                                             } else {
-                                                $coverCheckIdx = $nextIdx + $coverResumeAfter2pGui
+                                                Write-FlickFitWarning "[STEP5] 2ページ目GUI後の再開インデックスを一覧から確定できませんでした。一覧を再取得し splitPath / GUI開始パス優先で再評価します。"
+                                                $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
+                                                $coverLoopImgsRefreshed = $true
+                                                $coverWhileExitImgIdxOverride = Get-FlickFitCoverSpreadUltimateResumeImgIdx -Images $imgs -ProcessedSourcePath $splitPath2 -SpreadGuiEntryPath $spreadGuiEntryPath -StaleNextIdx $nextIdx
                                             }
                                             if ($true -eq $script:FlickFitDebugStep5Verbose) {
-                                                Write-FlickFitHost "         [IDX-DBG] entry path missing in list after split; used resolver coverCheckIdx=$coverCheckIdx" -ForegroundColor DarkYellow
+                                                Write-FlickFitHost ("         [IDX-DBG] entry path missing after split; splitSource={0} coverCheckIdx={1} imgIdxOverride={2}" -f $(Split-Path -Leaf $splitPath2), $coverCheckIdx, $(if ($null -ne $coverWhileExitImgIdxOverride) { $coverWhileExitImgIdxOverride } else { 'none' })) -ForegroundColor DarkYellow
                                             }
                                         }
                                     } else {
-                                        $resolvedCcGui = Get-FlickFitNextCoverLoopIndexAfterSpreadOp -Images $imgs -ProcessedSourcePath $splitPath2 -PythonResult $result
+                                        $resolvedCcGui = Resolve-FlickFitCoverCheckIdxAfterSpreadGuiOp -Images $imgs -ProcessedSourcePath $splitPath2 -PythonResult $result -ResumeDeltaFromSourceRow $coverResumeAfter2pGui
                                         if ($null -ne $resolvedCcGui) {
                                             $coverCheckIdx = $resolvedCcGui
                                             if ($true -eq $script:FlickFitDebugStep5Verbose) {
-                                                Write-FlickFitHost "         [IDX-DBG] staleNextIdx=$nextIdx splitSource=$(Split-Path -Leaf $splitPath2) resolvedCoverCheckIdx=$coverCheckIdx fallback=$($nextIdx + $coverResumeAfter2pGui)" -ForegroundColor DarkGray
+                                                Write-FlickFitHost "         [IDX-DBG] splitSource=$(Split-Path -Leaf $splitPath2) resolvedCoverCheckIdx=$coverCheckIdx (resolverまたは一覧フォールバック)" -ForegroundColor DarkGray
                                             }
                                         } else {
-                                            $coverCheckIdx = $nextIdx + $coverResumeAfter2pGui
+                                            Write-FlickFitWarning "[STEP5] 2ページ目GUI後の再開インデックスを一覧から確定できませんでした。一覧を再取得し splitPath / GUI開始パス優先で再評価します。"
+                                            $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
+                                            $coverLoopImgsRefreshed = $true
+                                            $coverWhileExitImgIdxOverride = Get-FlickFitCoverSpreadUltimateResumeImgIdx -Images $imgs -ProcessedSourcePath $splitPath2 -SpreadGuiEntryPath $spreadGuiEntryPath -StaleNextIdx $nextIdx
                                             if ($true -eq $script:FlickFitDebugStep5Verbose) {
-                                                Write-FlickFitHost "         [IDX-DBG] staleNextIdx=$nextIdx splitSource=$(Split-Path -Leaf $splitPath2) fallbackCoverCheckIdx=$coverCheckIdx (resolver missed _2/_1 leaf)" -ForegroundColor DarkYellow
+                                                Write-FlickFitHost "         [IDX-DBG] ultimate resume imgIdxOverride=$coverWhileExitImgIdxOverride splitSource=$(Split-Path -Leaf $splitPath2)" -ForegroundColor DarkYellow
                                             }
                                         }
                                     }
@@ -16770,7 +16934,25 @@ if __name__ == "__main__":
                                         $processedImages++
                                         $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
                                         $coverLoopImgsRefreshed = $true
-                                        $coverCheckIdx = $nextIdx + 1
+                                        $photoResumeM4 = Get-HashtableTrimmedString -Tbl $guiM4 -Key 'ApplyImagePath'
+                                        if ([string]::IsNullOrWhiteSpace($photoResumeM4)) { $photoResumeM4 = [string]$photoM4 }
+                                        if ([string]::IsNullOrWhiteSpace($photoResumeM4)) { $photoResumeM4 = $splitPathM4 }
+                                        $idxPhotoM4 = Get-FlickFitCoverLoopIndexForPath -Images $imgs -FullPath $photoResumeM4
+                                        if ($idxPhotoM4 -lt 0 -and -not [string]::IsNullOrWhiteSpace($photoResumeM4)) {
+                                            try {
+                                                $leafM4 = [System.IO.Path]::GetFileName($photoResumeM4)
+                                                $arrM4 = @($imgs)
+                                                for ($im4 = 0; $im4 -lt $arrM4.Count; $im4++) {
+                                                    if ([string]::Equals($arrM4[$im4].Name, $leafM4, [System.StringComparison]::OrdinalIgnoreCase)) { $idxPhotoM4 = $im4; break }
+                                                }
+                                            } catch { }
+                                        }
+                                        if ($idxPhotoM4 -ge 0) {
+                                            $coverCheckIdx = [Math]::Min($idxPhotoM4 + 1, $imgs.Count)
+                                        } else {
+                                            Write-FlickFitWarning "[STEP5] メニュー[4] PhotosEdit 後の再開インデックスを一覧から確定できませんでした。実処理パス優先で安全側から再評価します。"
+                                            $coverWhileExitImgIdxOverride = Get-FlickFitCoverSpreadUltimateResumeImgIdx -Images $imgs -ProcessedSourcePath $photoResumeM4 -SpreadGuiEntryPath $spreadGuiEntryPathM4 -StaleNextIdx $nextIdx
+                                        }
                                         break
                                     }
                                     $gutterX = $null
@@ -16886,15 +17068,25 @@ if __name__ == "__main__":
                                                     Write-FlickFitHost "         [IDX-DBG] menu[4] entry=$(Split-Path -Leaf $spreadGuiEntryPathM4) actual=$(Split-Path -Leaf $splitPathM4) → coverCheckIdx=$coverCheckIdx (resume entry)" -ForegroundColor DarkGray
                                                 }
                                             } else {
-                                                $resolvedCcM4 = Get-FlickFitNextCoverLoopIndexAfterSpreadOp -Images $imgs -ProcessedSourcePath $splitPathM4 -PythonResult $result
-                                                if ($null -ne $resolvedCcM4) { $coverCheckIdx = $resolvedCcM4 } else { $coverCheckIdx = $nextIdx + $coverResumeAfterM4 }
+                                                $resolvedCcM4 = Resolve-FlickFitCoverCheckIdxAfterSpreadGuiOp -Images $imgs -ProcessedSourcePath $splitPathM4 -PythonResult $result -ResumeDeltaFromSourceRow $coverResumeAfterM4
+                                                if ($null -ne $resolvedCcM4) {
+                                                    $coverCheckIdx = $resolvedCcM4
+                                                } else {
+                                                    Write-FlickFitWarning "[STEP5] メニュー[4] のどGUI後の再開インデックスを一覧から確定できませんでした。一覧を再取得し splitPath / GUI開始パス優先で再評価します。"
+                                                    $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
+                                                    $coverLoopImgsRefreshed = $true
+                                                    $coverWhileExitImgIdxOverride = Get-FlickFitCoverSpreadUltimateResumeImgIdx -Images $imgs -ProcessedSourcePath $splitPathM4 -SpreadGuiEntryPath $spreadGuiEntryPathM4 -StaleNextIdx $nextIdx
+                                                }
                                             }
                                         } else {
-                                            $resolvedCcM4 = Get-FlickFitNextCoverLoopIndexAfterSpreadOp -Images $imgs -ProcessedSourcePath $splitPathM4 -PythonResult $result
+                                            $resolvedCcM4 = Resolve-FlickFitCoverCheckIdxAfterSpreadGuiOp -Images $imgs -ProcessedSourcePath $splitPathM4 -PythonResult $result -ResumeDeltaFromSourceRow $coverResumeAfterM4
                                             if ($null -ne $resolvedCcM4) {
                                                 $coverCheckIdx = $resolvedCcM4
                                             } else {
-                                                $coverCheckIdx = $nextIdx + $coverResumeAfterM4
+                                                Write-FlickFitWarning "[STEP5] メニュー[4] のどGUI後の再開インデックスを一覧から確定できませんでした。一覧を再取得し splitPath / GUI開始パス優先で再評価します。"
+                                                $imgs = @(Get-ProcessableFolderImages -FolderPath $dir)
+                                                $coverLoopImgsRefreshed = $true
+                                                $coverWhileExitImgIdxOverride = Get-FlickFitCoverSpreadUltimateResumeImgIdx -Images $imgs -ProcessedSourcePath $splitPathM4 -SpreadGuiEntryPath $spreadGuiEntryPathM4 -StaleNextIdx $nextIdx
                                             }
                                         }
                                         break
@@ -18444,9 +18636,7 @@ if __name__ == "__main__":
                                                 if ($true -eq $script:FlickFitDebugStep5Delete) {
                                                     Write-FlickFitHost "         [DeleteDbg] GUI 削除済みエントリのため Python エラーを無視し retry / 復元しません ($imgName)" -ForegroundColor DarkCyan
                                                 }
-                                                if ($true -eq $script:FlickFitDebugStep5Retry) {
-                                                    Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=$(Test-Path -LiteralPath $entryPathStep5) entry=$entryPathStep5 skip=gui_deleted_entry") -ForegroundColor DarkYellow
-                                                }
+                                                Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=$(Test-Path -LiteralPath $entryPathStep5) entry=$entryPathStep5 skip=gui_deleted_entry") -ForegroundColor DarkYellow
                                                 Ensure-FlickFitStep5ErrorRetryCount
                                                 $kSkipGui = Get-FlickFitStep5ErrorRetryKey -Path $entryPathStep5
                                                 if (-not [string]::IsNullOrWhiteSpace($kSkipGui) -and $script:Step5ErrorRetryCount.ContainsKey($kSkipGui)) { [void]$script:Step5ErrorRetryCount.Remove($kSkipGui) }
@@ -18460,9 +18650,7 @@ if __name__ == "__main__":
                                             }
                                             if (-not (Test-Path -LiteralPath $entryPathStep5)) {
                                                 Write-FlickFitHost "         ↩ GUI 削除などで元画像が無いため retry / trim_only を行いません ($entryNameStep5)" -ForegroundColor DarkGray
-                                                if ($true -eq $script:FlickFitDebugStep5Retry) {
-                                                    Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=False entry=$entryPathStep5 skip=missing_entry_inner") -ForegroundColor DarkYellow
-                                                }
+                                                Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=False entry=$entryPathStep5 skip=missing_entry_inner") -ForegroundColor DarkYellow
                                                 Ensure-FlickFitStep5ErrorRetryCount
                                                 $kMissIn = Get-FlickFitStep5ErrorRetryKey -Path $entryPathStep5
                                                 if (-not [string]::IsNullOrWhiteSpace($kMissIn) -and $script:Step5ErrorRetryCount.ContainsKey($kMissIn)) { [void]$script:Step5ErrorRetryCount.Remove($kMissIn) }
@@ -18474,9 +18662,7 @@ if __name__ == "__main__":
                                                 $output = @('BAL_DELETE_CONTINUE')
                                                 break
                                             }
-                                            if ($true -eq $script:FlickFitDebugStep5Retry) {
-                                                Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=$(Test-Path -LiteralPath $entryPathStep5) entry=$entryPathStep5") -ForegroundColor DarkYellow
-                                            }
+                                            Write-FlickFitHost ("[STEP5RetryDbg] beforeRetry exists=$(Test-Path -LiteralPath $entryPathStep5) entry=$entryPathStep5") -ForegroundColor DarkYellow
                                             $actInner = Get-FlickFitStep5RetryAction -Path $entryPathStep5 -MaxRetryBeforeFallback 2
                                             # 1〜2 回目: 再GUI。3 回目: 無限ループ防止の trim_only
                                             if ($actInner -eq 'fallback') {
@@ -18504,9 +18690,7 @@ if __name__ == "__main__":
                                                 break
                                             }
                                             Write-FlickFitHost "         ⚠ GUI後の適用に失敗しました。元画像を復元し、ノド/余白を再設定してください" -ForegroundColor Yellow
-                                            if ($true -eq $script:FlickFitDebugStep5Retry) {
-                                                Write-FlickFitHost ("[STEP5RetryGui] entryPathStep5={0} imgName={1} origPath={2} (次ループで GUI ImagePath は entry に同期)" -f $entryPathStep5, $imgName, $origPath) -ForegroundColor DarkYellow
-                                            }
+                                            Write-FlickFitHost ("[STEP5RetryGui] entryPathStep5={0} imgName={1} origPath={2} (次ループで GUI ImagePath は entry に同期)" -f $entryPathStep5, $imgName, $origPath) -ForegroundColor DarkYellow
                                             if (Test-Path -LiteralPath $tempBackupB) {
                                                 Copy-Item -LiteralPath $tempBackupB -Destination $entryPathStep5 -Force -ErrorAction SilentlyContinue
                                             }

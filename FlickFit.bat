@@ -1,5 +1,5 @@
 @echo off
-REM FlickFit v1.0.1 launcher entry (FlickFitLauncher.ps1)
+REM FlickFit v1.0.2 launcher entry (FlickFitLauncher.ps1)
 setlocal
 
 echo FlickFit を起動しています...

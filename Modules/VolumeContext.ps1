@@ -33,6 +33,24 @@ function Get-FlickFitTokutoGateState {
     }
 }
 
+# 巻判定のみ: 末尾の [グループ名] を落とす（中身に巻・話・episode 等の手掛かりがある場合はそのまま）
+function Remove-FlickFitTrailingReleaseBracketGroups {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $Name }
+    $t = $Name.TrimEnd()
+    while ($true) {
+        $m = [regex]::Match($t, '\s*\[([^\]]+)\]\s*$')
+        if (-not $m.Success) { break }
+        $inner = $m.Groups[1].Value
+        if ($inner -match '(?i)巻|章|話|編|幕|期|篇|単行|総集|収録|\b話数\b|\bepisode\b|\bchapter\b|\bchap\b|\bvol\b|(?:^|\s)第\s*\d') {
+            break
+        }
+        $t = $t.Substring(0, [Math]::Max(0, $m.Index)).TrimEnd()
+        if ([string]::IsNullOrWhiteSpace($t)) { break }
+    }
+    return $t
+}
+
 function Get-VolFromParentName {
     param([string]$ParentName)
     if ([string]::IsNullOrWhiteSpace($ParentName)) { return $null }
@@ -41,6 +59,7 @@ function Get-VolFromParentName {
         $raw = Apply-FlickFitUserVolumeTextRules -Text $raw
     }
     $p = Convert-ZenToHan $raw
+    $p = Remove-FlickFitTrailingReleaseBracketGroups $p
     Write-Verbose "[FlickFit-Tokuto] Get-VolFromParentName.enter raw='$raw' p='$p'"
     $rng = [char]0xFF5E + [char]0x30FC
     if ($p -match ("第\s*0*(\d{1,3})\s*[-~" + $rng + "]\s*0*(\d{1,3})\s*巻")) { return @{ Start=[int]$Matches[1]; End=[int]$Matches[2]; IsParent=$true } }
@@ -56,6 +75,8 @@ function Get-VolFromParentName {
     if ($p -match '^0*(\d{1,3})$') { return @{ Vol=[int]$Matches[1]; IsParent=$true } }
     if ($p -match '(?i)^(?:vol\.?\s*|v)0*(\d{1,3})(?!\d)') { return @{ Vol=[int]$Matches[1]; IsParent=$true } }
     if ($p -match '(?i)(?:^|[\s\-_])(?:v|vol\.?)\s*0*(\d{1,3})[sSwWbB]?(?:\D|$)') { return @{ Vol=[int]$Matches[1]; IsParent=$true } }
+    # 第N部 カラー版 01 の末尾連番（末尾 [グループタグ] 除去済み）
+    if ($p -match '(?i)(カラー版|モノクロ版|完全版|文庫版|新装版)\s*0*(\d{1,3})\s*$') { return @{ Vol=[int]$Matches[2]; IsParent=$true } }
     if ($p -match '[（\(]\s*0*(\d{1,3})\s*[）\)]') {
         Write-Verbose "[FlickFit-Tokuto] Get-VolFromParentName.return genericParen(相当より先) p='$p' vol=$([int]$Matches[1])"
         return @{ Vol=[int]$Matches[1]; IsParent=$true }
@@ -200,7 +221,8 @@ function Get-VolContext {
         $selfRaw = Apply-FlickFitUserVolumeTextRules -Text $selfRaw
     }
     $self = Convert-ZenToHan $selfRaw
-    Write-Verbose "[FlickFit-Tokuto] Get-VolContext.enter path='$Path' selfRaw='$selfRaw' selfP='$self'"
+    $selfProbe = Remove-FlickFitTrailingReleaseBracketGroups $self
+    Write-Verbose "[FlickFit-Tokuto] Get-VolContext.enter path='$Path' selfRaw='$selfRaw' selfP='$self' probe='$selfProbe'"
     $anc = Get-AncestorChapterSignals $parts
     
     # coverフォルダは特別扱い（巻数判定から完全に除外）
@@ -418,36 +440,43 @@ function Get-VolContext {
     
     $isSpecial = $self -match '(?i)^(chapter|chap|ch\d|episode|ep\d|raw|おまけ)'
     $rng = [char]0xFF5E + [char]0x30FC
+    # 「第N部」「第 N 部」の N を巻にしない（キャプチャ直後が「空白* + 部」なら不一致）→ (?!\s*部)
+    $noBuZen = '(?!\s*' + [char]0x90E8 + ')'
+    # 巻ヒントのみ [リリースグループ][DL版] を除外（末尾 [第1巻] などはそのまま）
+    # ※ 「第N部」の N は部番号であり、第+数字単独ヒットより末尾連番や版種後の連番を優先するために selfProbe を使う。
+    $volNoBump = "(?![-" + $rng + "]|\\s*話)(?!特別|[大小中]隊|連隊|師団|旅団|部隊|軍|章|期|編|幕|話|巻)"
     if (-not $isSpecial) {
         # フォルダ名末尾の v04s / v04 を最優先（親が範囲 v03-05s でも子の v04s を第4巻にする）
-        if ($self -match '(?i)\bv0*(\d{1,3})[sSwWbBfF]?\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match ("(?i)(?:第|vol\.?\s*|v)\s*0*(\d{1,3})\s*[-~" + $rng + "]\s*0*(\d{1,3})")) { return [PSCustomObject]@{ Type='Range'; Start=[int]$Matches[1]; End=[int]$Matches[2]; Name=$self } }
-        # vol / 第（巻含む上段で未処理の単独巻）を、括弧列・（N）相当より先に
-        if ($self -match ("(?i)(?:vol\.?\s*|v(?=\d))\s*0*(\d{1,3})(?![-~" + $rng + "]|\s*話)")) { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match ("(?i)第\s*0*(\d{1,3})(?![-~" + $rng + "]|\s*話)(?!特別|[大小中]隊|連隊|師団|旅団|部隊|軍|章|期|編|幕|話|巻)")) { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '(?i)\bv0*(\d{1,3})[sSwWbBfF]?\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match ("(?i)(?:第|vol\.?\s*|v)\s*0*(\d{1,3})\s*[-~" + $rng + "]\s*0*(\d{1,3})")) { return [PSCustomObject]@{ Type='Range'; Start=[int]$Matches[1]; End=[int]$Matches[2]; Name=$self } }
+        # vol / 第（巻含む上段で未処理の単独巻）を、括弧列・（N）相当より先に（第N部の N は巻として扱わない）
+        if ($selfProbe -match ("(?i)(?:vol\.?\s*|v(?=\d))\s*0*(\d{1,3})(?![-~" + $rng + "]|\s*話)")) { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match ("(?i)第\s*0*(\d{1,3})" + $noBuZen + $volNoBump)) { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
         # （N）/ (N) はコミックタイトル末尾の巻表記で多い → 最後の一致を優先（先頭に現れる「第○○…」形式より末尾の括弧を優先）
-        $parenVolMs = [regex]::Matches($self, '[（\(]\s*0*(\d{1,3})\s*[）\)]')
+        $parenVolMs = [regex]::Matches($selfProbe, '[（\(]\s*0*(\d{1,3})\s*[）\)]')
         if ($parenVolMs.Count -gt 0) {
             $pvParen = [int]$parenVolMs[$parenVolMs.Count - 1].Groups[1].Value
             if ($pvParen -ge 1) { return [PSCustomObject]@{ Type='Single'; Vol=$pvParen; Name=$self } }
         }
-        if ($self -match '(?i)[_\-]v0*(\d{1,3})[wWsSbBfF]?$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '[_\-]0*(\d{1,3})[wWsSbBfF]?$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '[：:][\s　]*0*(\d{1,3})\s*(?:[（\(][^）\)]*[）\)])?\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '(?<![：:\d])\s+0*(\d{1,3})[fF]\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '(?<![：:\d])\s+0*(\d{1,3})\s*[wWsSbBfF]?\s*(?:[（\(][^）\)]*[）\)])?\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match 'その\s*0*(\d{1,3})(?:\s|　|\[|$|\))') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '0*(\d{1,3})\s*巻') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '[ぁ-んァ-ヶ一-龯]\s+0*(\d{1,3})\s+[ぁ-んァ-ヶ一-龯]') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '[\]）\)]\s*[^\[\]]+\s+0*(\d{1,3})\s*\[') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '\p{L}0*(\d{1,3})\s*\[') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '\]\s*[^[\]]+?\s+0*(\d{1,3})\s+\[') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '[!！]\s*0*(\d{1,3})\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '[～〜~]\s*0*(\d{1,3})(?:\s*\[|\s*$)') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '[ぁ-んァ-ヶ一-龯]0*(\d{1,3})\s+[～〜]') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '[ぁ-んァ-ヶ一-龯]0*(\d{1,3})\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        if ($self -match '[。．]\s*0*(\d{1,3})(?:\s*\[|\s*$)') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-        $tgS = Get-FlickFitTokutoGateState -Label 'Get-VolContext.self' -InStr $selfRaw -P $self
+        if ($selfProbe -match '(?i)[_\-]v0*(\d{1,3})[wWsSbBfF]?$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '[_\-]0*(\d{1,3})[wWsSbBfF]?$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '[：:][\s　]*0*(\d{1,3})\s*(?:[（\(][^）\)]*[）\)])?\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '(?<![：:\d])\s+0*(\d{1,3})[fF]\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '(?<![：:\d])\s+0*(\d{1,3})\s*[wWsSbBfF]?\s*(?:[（\(][^）\)]*[）\)])?\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match 'その\s*0*(\d{1,3})(?:\s|　|\[|$|\))') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '0*(\d{1,3})\s*巻') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '[ぁ-んァ-ヶ一-龯]\s+0*(\d{1,3})\s+[ぁ-んァ-ヶ一-龯]') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '[\]）\)]\s*[^\[\]]+\s+0*(\d{1,3})\s*\[') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '\p{L}0*(\d{1,3})\s*\[') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '\]\s*[^[\]]+?\s+0*(\d{1,3})\s+\[') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '[!！]\s*0*(\d{1,3})\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '[～〜~]\s*0*(\d{1,3})(?:\s*\[|\s*$)') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '[ぁ-んァ-ヶ一-龯]0*(\d{1,3})\s+[～〜]') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '[ぁ-んァ-ヶ一-龯]0*(\d{1,3})\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        if ($selfProbe -match '[。．]\s*0*(\d{1,3})(?:\s*\[|\s*$)') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+        # カラー版/完全版など版種語の後ろにある末尾連番（第N部 と併記される配布フォルダ名向け）
+        if ($selfProbe -match '(?i)(カラー版|モノクロ版|完全版|文庫版|新装版)\s*0*(\d{1,3})\s*$') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[2]; Name=$self } }
+        $tgS = Get-FlickFitTokutoGateState -Label 'Get-VolContext.self' -InStr $selfRaw -P $selfProbe
         if ($tgS.Nm1 -and $tgS.Nm2 -and $tgS.Nm3 -and $tgS.Ok) {
             $tv = [int](Convert-ZenToHan $tgS.G1.Trim())
             if ($tv -ge 1) {
@@ -462,11 +491,12 @@ function Get-VolContext {
     }
     if ($parts.Count -gt 1) {
         $parent = Convert-ZenToHan $parts[1]
+        $parentProbe = Remove-FlickFitTrailingReleaseBracketGroups $parent
         if ($parent -notmatch '(?i)(chapter|chap|ch|episode|ep|raw|cover|表紙|おまけ)') {
-            if ($parent -match ("(?i)(?:vol\.?\s*|v(?=\d))\s*0*(\d{1,3})(?![-~" + $rng + "])")) { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
-            if ($parent -match ("(?i)第\s*0*(\d{1,3})(?![-~" + $rng + "])(?!特別|[大小中]隊|連隊|師団|旅団|部隊|軍|章|期|編|幕|話|巻)")) { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+            if ($parentProbe -match ("(?i)(?:vol\.?\s*|v(?=\d))\s*0*(\d{1,3})(?![-~" + $rng + "])")) { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+            if ($parentProbe -match ("(?i)第\s*0*(\d{1,3})" + $noBuZen + $volNoBump)) { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
             $prRaw = if ($null -ne $parts[1]) { $parts[1].Trim() } else { '' }
-            $tgPr = Get-FlickFitTokutoGateState -Label 'Get-VolContext.parent' -InStr $prRaw -P $parent
+            $tgPr = Get-FlickFitTokutoGateState -Label 'Get-VolContext.parent' -InStr $prRaw -P $parentProbe
             if ($tgPr.Nm1 -and $tgPr.Nm2 -and $tgPr.Nm3 -and $tgPr.Ok) {
                 $pvTok = [int](Convert-ZenToHan $tgPr.G1.Trim())
                 if ($pvTok -ge 1) {
@@ -478,7 +508,7 @@ function Get-VolContext {
             else {
                 Write-Verbose "[FlickFit-Tokuto] Get-VolContext.parentFallback tokutoGate skip nm=$($tgPr.Nm1),$($tgPr.Nm2),$($tgPr.Nm3) ok=$($tgPr.Ok)"
             }
-            if ($parent -match '[（\(]\s*0*(\d{1,3})\s*[）\)]') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
+            if ($parentProbe -match '[（\(]\s*0*(\d{1,3})\s*[）\)]') { return [PSCustomObject]@{ Type='Single'; Vol=[int]$Matches[1]; Name=$self } }
         }
     }
     # フラット構造: 作品名 日本語サブタイトル（巻数なし）→ 特別巻

@@ -11,6 +11,9 @@
 $ModulesDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path $MyInvocation.MyCommand.Path -Parent }
 $script:FlickFitProjectRoot = if ((Split-Path -Leaf $ModulesDir) -eq 'Modules') { Split-Path -Parent $ModulesDir } else { $ModulesDir }
 
+$ffv = Join-Path $ModulesDir 'FlickFitVersion.ps1'
+if (Test-Path -LiteralPath $ffv) { try { . $ffv } catch { } }
+
 . (Join-Path $ModulesDir "Config.ps1")
 . (Join-Path $ModulesDir "VolumePatternRules.Parse.ps1")
 . (Join-Path $ModulesDir "VolumePatternOverrides.Load.ps1")

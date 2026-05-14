@@ -1,5 +1,5 @@
 ﻿#Requires -Version 5.1
-# FlickFit Launcher v1.0.1 — 最小ランチャー（WinForms）。メインは別コンソールの PowerShell で起動する。
+# FlickFit Launcher — 最小ランチャー（WinForms）。メインは別コンソールの PowerShell で起動する。実行時タイトルの版は VERSION 参照。
 #
 # 【メイン終了後にランチャーも落ちる問題の要点】旧来の「親から子 pwsh を直接 Process.Start」では子終了で親ランチャーが巻き込まれることがあった。
 # 対策: 非表示 cmd を watcher とし、一時 .cmd 内で start "" /wait pwsh …（.cmd は UTF-8 BOM + 先頭 chcp 65001、日本語パス・引用符）。
@@ -42,6 +42,17 @@ function Hide-FlickFitLauncherConsole {
 try { Hide-FlickFitLauncherConsole } catch { }
 
 $script:RootDir = $PSScriptRoot
+$ffVerPs1 = Join-Path $script:RootDir 'Modules\FlickFitVersion.ps1'
+if (Test-Path -LiteralPath $ffVerPs1) { try { . $ffVerPs1 } catch { } }
+$script:FlickFitVersion = 'dev'
+if (Get-Command Get-FlickFitVersion -ErrorAction SilentlyContinue) {
+    try {
+        $tv = Get-FlickFitVersion -PackageRoot $script:RootDir
+        if (-not [string]::IsNullOrWhiteSpace($tv)) { $script:FlickFitVersion = $tv }
+    } catch { }
+}
+if ([string]::IsNullOrWhiteSpace($script:FlickFitVersion)) { $script:FlickFitVersion = 'dev' }
+
 $script:LauncherTracePath = Join-Path $script:RootDir 'launcher_trace.log'
 $script:EnginePs1 = Join-Path $script:RootDir 'FlickFit-Core.ps1'
 $script:EngineProcess = $null
@@ -1005,7 +1016,7 @@ function Show-FlickFitAutoJudgeSettingsDialog {
 }
 
 $form = [System.Windows.Forms.Form]::new()
-$form.Text = 'FlickFit v1.0.1'
+$form.Text = ('FlickFit v{0}' -f $script:FlickFitVersion)
 # Size ではなく ClientSize（描画領域）を指定。高さ不足だと下部のヒントが見切れる
 $form.ClientSize = [System.Drawing.Size]::new(700, 732)
 $form.MinimumSize = [System.Drawing.Size]::new(620, 622)
